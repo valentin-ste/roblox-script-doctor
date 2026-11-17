@@ -1,0 +1,9 @@
+{
+	"name": "ScriptDoctor",
+	"tree": {
+		"$path": "src/plugin",
+		"Core": {
+			"$path": "src/core"
+		}
+	}
+}
