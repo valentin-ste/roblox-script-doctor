@@ -136,6 +136,7 @@ check(
 pcall(function()
 	ScriptEditorService:OpenScriptDocumentAsync(deprecated)
 end)
+check("a script is open in the editor", ScriptEditorService:FindScriptDocument(deprecated) ~= nil)
 local finished = 0
 for _ = 1, 2 do
 	task.spawn(function()
@@ -143,6 +144,8 @@ for _ = 1, 2 do
 		finished += 1
 	end)
 end
+-- the first press is still editing the open script (it yields); the second has returned
+check("the second press came while the first was working", finished == 1, finished)
 local deadline = os.clock() + 30
 while finished < 2 and os.clock() < deadline do
 	task.wait()
