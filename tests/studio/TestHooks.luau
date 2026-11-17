@@ -1,7 +1,7 @@
 --[[
 	Automation hook for our own Studio tests. Only the test build includes it:
 
-		rojo build test.project.json -o build/ScriptDoctor.rbxm
+		rojo build test.project.json -o build/ScriptDoctor-test.rbxm
 
 	Setting the widget attribute "Command" to "scan", "fixall" or "undo" does the same as
 	pressing the button (without the confirming second click). "Done" counts finished commands.

@@ -40,8 +40,10 @@ local APP_NAME = "Script Doctor"
 local MAX_ROWS = 300
 -- how many fix steps "Undo fixes" can take back
 local MAX_UNDO_STEPS = 20
--- how long "Fix N safe" waits for the confirming second click
+-- how long "Fix N safe" waits for the confirming second click, and how soon it may come:
+-- a quick double click is one gesture, not a confirmation
 local CONFIRM_SECONDS = 6
+local CONFIRM_MIN_SECONDS = 1
 
 -- Every service of the place is scanned (backdoors hide in Chat, TextChatService and other
 -- odd places), except these: Roblox's own code and plugin internals, not the game's.
@@ -248,7 +250,9 @@ function App.mount(host: Instance, options: Options?): Controller
 	-- what the last fix or undo did, shown in the banner until the next scan
 	local notice: string? = nil
 	local noticeColor = SUCCESS
-	-- "Fix N safe" was clicked once; a second click before this moment applies the fixes
+	-- "Fix N safe" was clicked once at confirmFrom; a second click after
+	-- confirmFrom + CONFIRM_MIN_SECONDS and before confirmUntil applies the fixes
+	local confirmFrom = 0
 	local confirmUntil = 0
 	local connections: { RBXScriptConnection } = {}
 	local destroyed = false
@@ -983,16 +987,20 @@ function App.mount(host: Instance, options: Options?): Controller
 	scanButton.MouseButton1Click:Connect(function()
 		task.spawn(scan)
 	end)
-	-- the first click asks, the second (within a few seconds) fixes
+	-- the first click asks, the second (after a second, within a few) fixes
 	fixAllButton.MouseButton1Click:Connect(function()
 		if busy then
 			return
 		end
-		if os.clock() < confirmUntil then
-			task.spawn(fixAll)
+		local now = os.clock()
+		if now < confirmUntil then
+			if now - confirmFrom >= CONFIRM_MIN_SECONDS then
+				task.spawn(fixAll)
+			end
 			return
 		end
-		confirmUntil = os.clock() + CONFIRM_SECONDS
+		confirmFrom = now
+		confirmUntil = now + CONFIRM_SECONDS
 		render()
 		task.delay(CONFIRM_SECONDS, function()
 			if not destroyed and not busy and confirmUntil ~= 0 and os.clock() >= confirmUntil then
