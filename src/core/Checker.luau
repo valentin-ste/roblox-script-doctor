@@ -1302,13 +1302,11 @@ function Checker.check(source: string, options: Options?): { Finding }
 		-- `amount = amount * 2`: the new value is made from the old one, so it limits nothing
 		-- (`amount = math.min(amount, MAX)` counts through the math.min call instead)
 		local function usesItself(start: number, param: string): boolean
-			local line = tokens[start] and tokens[start].line
-			local cursor = start
-			while tokens[cursor] and tokens[cursor].line == line and not isKeyword(cursor, "end") do
+			-- only the assigned expression: `amount = 100 elseif amount < 0 then` stops at 100
+			for cursor = start, expressionEnd(start, count) do
 				if isName(cursor, param) and not isSymbol(cursor - 1, ".") then
 					return true
 				end
-				cursor += 1
 			end
 			return false
 		end
@@ -1365,7 +1363,7 @@ function Checker.check(source: string, options: Options?): { Finding }
 			elseif kind(inner - 1) == "symbol" and COMPARISONS[text(inner - 1)] then
 				operator, other, paramLeft = text(inner - 1), inner - 2, false
 			end
-			if not operator or operator == "~=" or isName(other, param) then
+			if not operator or isName(other, param) then
 				return nil
 			end
 			if isKeyword(other, "nil") or isKeyword(other, "true") or isKeyword(other, "false") then
@@ -1375,9 +1373,11 @@ function Checker.check(source: string, options: Options?): { Finding }
 			if not sense then
 				return nil
 			end
-			if operator == "==" then
-				-- `if amount == 5 then return end` leaves any other number
-				return if sense == "holds" then "both" else nil
+			if operator == "==" or operator == "~=" then
+				-- equal to one value where the code goes on: `amount == 5` holding, or
+				-- `if amount ~= 5 then return end`; the other way round leaves any number
+				local equal = (operator == "==") == (sense == "holds")
+				return if equal then "both" else nil
 			end
 			local less = operator == "<" or operator == "<="
 			-- "the value is at most X": amount < X, amount <= X, X > amount, X >= amount

@@ -159,3 +159,24 @@ ReplicatedStorage.Give15.OnServerEvent:Connect(function(player, amount)
 	end
 	player.leaderstats.Coins.Value += amount --! remote-client-value
 end)
+
+-- Fine: limited from both sides on one line.
+ReplicatedStorage.Give16.OnServerEvent:Connect(function(player, amount)
+	if amount > MAX_GIFT then amount = MAX_GIFT elseif amount < 0 then amount = 0 end
+	player.leaderstats.Coins.Value += amount
+end)
+
+-- Fine: only one value gets past the check.
+ReplicatedStorage.Give17.OnServerEvent:Connect(function(player, amount)
+	if amount ~= 5 then
+		return
+	end
+	player.leaderstats.Coins.Value += amount
+end)
+
+-- `~= 5` where the write happens leaves every other number.
+ReplicatedStorage.Give18.OnServerEvent:Connect(function(player, amount)
+	if amount ~= 5 then
+		player.leaderstats.Coins.Value += amount --! remote-client-value
+	end
+end)
