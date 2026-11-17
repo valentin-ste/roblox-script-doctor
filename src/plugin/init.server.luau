@@ -36,20 +36,11 @@ widget:GetPropertyChangedSignal("Enabled"):Connect(function()
 	openButton:SetActive(widget.Enabled)
 end)
 
--- Automation hook used by our own tests: setting the widget attribute "Command" to "scan",
--- "fixall" or "undo" does the same as pressing the button. "Done" counts finished commands.
-local COMMANDS = { scan = app.scan, fixall = app.fixAll, undo = app.undoFixes }
-widget:GetAttributeChangedSignal("Command"):Connect(function()
-	local command = widget:GetAttribute("Command")
-	if command == nil then
-		return
-	end
-	widget:SetAttribute("Command", nil)
-	task.spawn(function()
-		local action = COMMANDS[command]
-		if action then
-			action()
-		end
-		widget:SetAttribute("Done", (widget:GetAttribute("Done") or 0) + 1)
-	end)
-end)
+-- Clean up when the plugin is turned off, updated or Studio closes.
+plugin.Unloading:Connect(app.destroy)
+
+-- Only the test build (test.project.json) has this module: commands for automated tests.
+local testHooks = script:FindFirstChild("TestHooks")
+if testHooks then
+	require(testHooks :: ModuleScript)(widget, app)
+end

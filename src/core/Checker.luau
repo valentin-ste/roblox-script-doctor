@@ -240,7 +240,7 @@ local JOINT_METHODS = { makeJoints = true, breakJoints = true, MakeJoints = true
 local DATASTORE_GETTERS = { "GetDataStore", "GetOrderedDataStore", "GetGlobalDataStore" }
 
 -- MemoryStoreService getters and the methods of what they return.
-local MEMORYSTORE_GETTERS = { GetSortedMap = true, GetQueue = true, GetHashMap = true }
+local MEMORYSTORE_GETTERS: { [string]: boolean } = { GetSortedMap = true, GetQueue = true, GetHashMap = true }
 local MEMORYSTORE_METHODS = {
 	GetAsync = true,
 	SetAsync = true,

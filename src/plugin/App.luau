@@ -7,12 +7,14 @@
 
 	- click a finding  -> opens the script at that line
 	- "Fix"            -> applies the safe replacement for one finding
-	- "Fix N safe"     -> applies every safe replacement in the place
-	- "Undo fixes"     -> puts back the text replaced by the last fix
+	- "Fix N safe"     -> asks once more, then applies every safe replacement in the place
+	- "Undo fixes"     -> puts back the text replaced by the last fix (press again for the
+	                      one before); kept in memory until Studio closes
 
 	All analysis lives in Core/Checker (pure Luau, tested outside Studio).
 ]]
 
+local RunService = game:GetService("RunService")
 local ScriptEditorService = game:GetService("ScriptEditorService")
 
 local Checker = require(script.Parent.Core.Checker)
@@ -36,21 +38,31 @@ export type Controller = {
 
 local APP_NAME = "Script Doctor"
 local MAX_ROWS = 300
+-- how many fix steps "Undo fixes" can take back
+local MAX_UNDO_STEPS = 20
+-- how long "Fix N safe" waits for the confirming second click
+local CONFIRM_SECONDS = 6
 
--- Services whose descendants are scanned.
-local SCAN_ROOTS = {
-	"Workspace",
-	"ReplicatedFirst",
-	"ReplicatedStorage",
-	"ServerScriptService",
-	"ServerStorage",
+-- Every service of the place is scanned (backdoors hide in Chat, TextChatService and other
+-- odd places), except these: Roblox's own code and plugin internals, not the game's.
+local SKIPPED_SERVICES = {
+	CoreGui = true,
+	CorePackages = true,
+	RobloxReplicatedStorage = true,
+	RobloxPluginGuiService = true,
+	PluginGuiService = true,
+	PluginDebugService = true,
+}
+
+-- Containers whose ModuleScripts run on the client.
+local CLIENT_CONTAINERS = {
+	"StarterPlayerScripts",
+	"StarterCharacterScripts",
 	"StarterGui",
 	"StarterPack",
-	"StarterPlayer",
-	"Lighting",
-	"SoundService",
-	"Teams",
+	"ReplicatedFirst",
 }
+local SERVER_CONTAINERS = { "ServerScriptService", "ServerStorage" }
 
 local SEVERITIES = {
 	{ id = "security", label = "Security", color = Color3.fromRGB(214, 69, 69) },
@@ -67,6 +79,7 @@ end
 
 local PRIMARY = Color3.fromRGB(0, 116, 204)
 local SUCCESS = Color3.fromRGB(46, 140, 82)
+local WARNING = Color3.fromRGB(176, 106, 20)
 local WHITE = Color3.new(1, 1, 1)
 
 type Result = { script: LuaSourceContainer, finding: Checker.Finding }
@@ -105,11 +118,23 @@ local function padding(horizontal: number, vertical: number): UIPadding
 	})
 end
 
+-- "client" / "server" from the script class, and for a ModuleScript from where it lives;
+-- nil for a ModuleScript in a shared place (ReplicatedStorage), the checker then guesses.
 local function scriptKindOf(container: LuaSourceContainer): string?
 	if container:IsA("LocalScript") then
 		return "client"
 	elseif container:IsA("Script") then
-		return if container.RunContext == Enum.RunContext.Client then "client" else "server"
+		return if (container :: Script).RunContext == Enum.RunContext.Client then "client" else "server"
+	end
+	for _, className in CLIENT_CONTAINERS do
+		if container:FindFirstAncestorWhichIsA(className) then
+			return "client"
+		end
+	end
+	for _, className in SERVER_CONTAINERS do
+		if container:FindFirstAncestorWhichIsA(className) then
+			return "server"
+		end
 	end
 	return nil
 end
@@ -138,13 +163,27 @@ local function writeChange(
 		document = ScriptEditorService:FindScriptDocument(container)
 	end)
 	if not document then
+		-- a closed script: UpdateSourceAsync is the way Roblox asks plugins to change scripts
+		-- (it keeps Team Create collaborative editing in sync); no cursor to keep here
 		local ok, message = pcall(function()
-			(container :: any).Source = newSource
+			ScriptEditorService:UpdateSourceAsync(container, function(current: string): string?
+				-- changed by someone since we read it: leave it alone
+				return if current == source then newSource else nil
+			end)
 		end)
+		if ok then
+			return readSource(container) == newSource
+		end
+		-- the API refused: write Source directly, but only over the text we read
+		if readSource(container) == source then
+			ok, message = pcall(function()
+				(container :: any).Source = newSource
+			end)
+		end
 		if not ok then
 			warn(`[{APP_NAME}] could not change {container:GetFullName()}: {message}`)
 		end
-		return ok
+		return ok and readSource(container) == newSource
 	end
 
 	local selection = { pcall(document.GetSelection, document) }
@@ -191,14 +230,28 @@ function App.mount(host: Instance, options: Options?): Controller
 	local results: { Result } = {}
 	local scannedScripts = 0
 	local hasScanned = false
-	local scanning = false
+	-- a scan, fix or undo is running; every other action waits for it to finish (an edit of an
+	-- open script yields, and a second click would otherwise fix half-changed text)
+	local busy = false
+	local progress: string? = nil
 	local enabledSeverity = { security = true, bug = true, deprecated = true, advice = true }
 	-- Studio's own undo (Ctrl+Z) does not bring back script text changed by a plugin, so we
-	-- remember the text we replaced and offer our own "Undo fixes".
-	local lastChanges: { Change } = {}
-	-- what the last fix or undo did, shown in the green banner until the next scan
+	-- remember the text we replaced and offer our own "Undo fixes", one step per press.
+	local undoSteps: { { Change } } = {}
+	-- method names defined by any script of the place (see Checker.definedMembers), and a
+	-- cache of them per script so a scan after a fix does not parse every script again
+	local knownMembers: { [string]: boolean } = {}
+	local memberCache: { [LuaSourceContainer]: { source: string, members: { [string]: boolean } } } = setmetatable(
+		{},
+		{ __mode = "k" }
+	) :: any
+	-- what the last fix or undo did, shown in the banner until the next scan
 	local notice: string? = nil
+	local noticeColor = SUCCESS
+	-- "Fix N safe" was clicked once; a second click before this moment applies the fixes
+	local confirmUntil = 0
 	local connections: { RBXScriptConnection } = {}
+	local destroyed = false
 
 	----------------------------------------------------------------------------
 	-- Layout
@@ -333,6 +386,15 @@ function App.mount(host: Instance, options: Options?): Controller
 	local filterButtons: { [string]: TextButton } = {}
 	local render: () -> ()
 
+	-- Fixes change the scripts of this DataModel. During a test (Play / Run) that is a copy
+	-- thrown away on Stop, so fixing is switched off there.
+	local function canEdit(): boolean
+		local ok, isEdit = pcall(function()
+			return RunService:IsEdit()
+		end)
+		return not ok or isEdit
+	end
+
 	----------------------------------------------------------------------------
 	-- Scanning and fixing
 	----------------------------------------------------------------------------
@@ -343,15 +405,19 @@ function App.mount(host: Instance, options: Options?): Controller
 		if customRoots then
 			roots = customRoots
 		else
-			for _, serviceName in SCAN_ROOTS do
-				local ok, service = pcall(game.GetService, game, serviceName)
-				if ok and service then
+			for _, service in game:GetChildren() do
+				if not SKIPPED_SERVICES[service.ClassName] then
 					table.insert(roots, service)
 				end
 			end
 		end
 		for _, scanRoot in roots do
-			for _, descendant in scanRoot:GetDescendants() do
+			-- some services refuse plugins; skip them instead of stopping the scan
+			local ok, descendants = pcall(scanRoot.GetDescendants, scanRoot)
+			if not ok then
+				continue
+			end
+			for _, descendant in descendants do
 				if descendant:IsA("LuaSourceContainer") then
 					table.insert(scripts, descendant)
 				end
@@ -360,66 +426,115 @@ function App.mount(host: Instance, options: Options?): Controller
 		return scripts
 	end
 
-	local function checkInto(container: LuaSourceContainer, into: { Result })
-		local source = readSource(container)
-		if not source then
-			return
-		end
-		local ok, findings = pcall(Checker.check, source, { scriptKind = scriptKindOf(container) })
-		if ok then
-			for _, finding in findings do
-				table.insert(into, { script = container, finding = finding })
-			end
-		else
-			warn(`[{APP_NAME}] could not check {container:GetFullName()}: {findings}`)
+	local function checkOptions(container: LuaSourceContainer): Checker.Options
+		return { scriptKind = scriptKindOf(container), knownMembers = knownMembers }
+	end
+
+	local function setProgress(text: string?)
+		progress = text
+		if text then
+			statusLabel.Text = text
 		end
 	end
 
 	local function runScan()
-		scanning = true
-		local fresh: { Result } = {}
 		local scripts = collectScripts()
+		-- 1. the method names every script defines, so that a `:destroy()` on a class from
+		--    another ModuleScript is not offered for renaming
+		local sources: { [LuaSourceContainer]: string } = {}
+		local members: { [string]: boolean } = {}
 		for index, container in scripts do
-			checkInto(container, fresh)
-			if index % 25 == 0 then
-				statusLabel.Text = `Scanning… {index} / {#scripts} scripts`
+			local source = readSource(container)
+			if source then
+				sources[container] = source
+				local cached = memberCache[container]
+				if not cached or cached.source ~= source then
+					local ok, defined = pcall(Checker.definedMembers, source)
+					cached = { source = source, members = if ok then defined else {} }
+					memberCache[container] = cached
+				end
+				for name in (cached :: any).members do
+					members[name] = true
+				end
+			end
+			if index % 50 == 0 then
+				setProgress(`Reading… {index} / {#scripts} scripts`)
 				task.wait()
 			end
 		end
+		knownMembers = members
+		-- 2. the findings
+		local fresh: { Result } = {}
+		for index, container in scripts do
+			local source = sources[container]
+			if source then
+				local ok, findings = pcall(Checker.check, source, checkOptions(container))
+				if ok then
+					for _, finding in findings do
+						table.insert(fresh, { script = container, finding = finding })
+					end
+				else
+					warn(`[{APP_NAME}] could not check {container:GetFullName()}: {findings}`)
+				end
+			end
+			if index % 25 == 0 then
+				setProgress(`Scanning… {index} / {#scripts} scripts`)
+				task.wait()
+			end
+		end
+		setProgress(nil)
 		results = fresh
 		scannedScripts = #scripts
 		hasScanned = true
-		scanning = false
+	end
+
+	-- Runs one action at a time: a click during a scan, fix or undo does nothing. An error
+	-- inside the action is reported in the banner instead of leaving the panel stuck.
+	local function exclusive(action: () -> ())
+		if busy or destroyed then
+			return
+		end
+		busy = true
+		confirmUntil = 0
 		render()
-	end
-
-	local function scan()
-		if scanning then
-			return
+		local ok, message = pcall(action)
+		busy = false
+		setProgress(nil)
+		if not ok then
+			warn(`[{APP_NAME}] {message}`)
+			notice = `Something went wrong: {message}`
+			noticeColor = WARNING
 		end
-		notice = nil
-		runScan()
+		if not destroyed then
+			render()
+		end
 	end
 
-	-- Rewrites one script. `pick` chooses which current findings to fix.
+	-- Rewrites one script. `pick` chooses which current findings to fix. A failure in one
+	-- script is reported and the others go on, so every change made is kept for undo.
 	local function fixScript(container: LuaSourceContainer, pick: (Checker.Finding) -> boolean, changes: { Change })
-		local source = readSource(container)
-		if not source then
-			return
-		end
-		local chosen = {}
-		for _, finding in Checker.check(source, { scriptKind = scriptKindOf(container) }) do
-			if finding.fix and pick(finding) then
-				table.insert(chosen, finding)
+		local ok, message = pcall(function()
+			local source = readSource(container)
+			if not source then
+				return
 			end
-		end
-		local fixes = Checker.orderedFixes(chosen)
-		local newSource, applied = Checker.applyFixes(source, chosen)
-		if applied > 0 and writeChange(container, source, newSource, fixes) then
-			table.insert(
-				changes,
-				{ script = container, before = source, after = newSource, count = applied, fixes = fixes }
-			)
+			local chosen = {}
+			for _, finding in Checker.check(source, checkOptions(container)) do
+				if finding.fix and pick(finding) then
+					table.insert(chosen, finding)
+				end
+			end
+			local fixes = Checker.orderedFixes(chosen)
+			local newSource, applied = Checker.applyFixes(source, chosen)
+			if applied > 0 and writeChange(container, source, newSource, fixes) then
+				table.insert(
+					changes,
+					{ script = container, before = source, after = newSource, count = applied, fixes = fixes }
+				)
+			end
+		end)
+		if not ok then
+			warn(`[{APP_NAME}] could not fix {container:GetFullName()}: {message}`)
 		end
 	end
 
@@ -456,44 +571,65 @@ function App.mount(host: Instance, options: Options?): Controller
 	end
 
 	local function finishFix(changes: { Change })
+		noticeColor = SUCCESS
 		if #changes == 0 then
 			notice = "Nothing was changed: these scripts no longer have that issue. Scanned again."
 		else
-			lastChanges = changes
-			notice = describe(changes) .. " Use “Undo fixes” to put the old text back."
+			table.insert(undoSteps, changes)
+			if #undoSteps > MAX_UNDO_STEPS then
+				table.remove(undoSteps, 1)
+			end
+			notice = describe(changes)
+				.. " Ctrl+Z does not undo this; “Undo fixes” here does, until Studio is closed."
 		end
 		runScan()
 	end
 
+	local function scan()
+		exclusive(function()
+			notice = nil
+			runScan()
+		end)
+	end
+
 	local function fixAll()
-		if scanning then
-			return
-		end
-		local touched: { [LuaSourceContainer]: boolean } = {}
-		for _, result in results do
-			if result.finding.fix then
-				touched[result.script] = true
+		exclusive(function()
+			if not canEdit() then
+				return
 			end
-		end
-		local changes: { Change } = {}
-		for container in touched do
-			fixScript(container, function()
-				return true
-			end, changes)
-		end
-		finishFix(changes)
+			local touched: { [LuaSourceContainer]: boolean } = {}
+			for _, result in results do
+				if result.finding.fix then
+					touched[result.script] = true
+				end
+			end
+			local changes: { Change } = {}
+			local done = 0
+			for container in touched do
+				fixScript(container, function()
+					return true
+				end, changes)
+				done += 1
+				setProgress(`Fixing… {done} scripts`)
+			end
+			finishFix(changes)
+		end)
 	end
 
 	local function fixOne(result: Result)
-		if scanning then
-			return
-		end
-		local finding = result.finding
 		local changes: { Change } = {}
-		fixScript(result.script, function(candidate)
-			return candidate.rule == finding.rule and candidate.line == finding.line and candidate.col == finding.col
-		end, changes)
-		finishFix(changes)
+		exclusive(function()
+			if not canEdit() then
+				return
+			end
+			local finding = result.finding
+			fixScript(result.script, function(candidate)
+				return candidate.rule == finding.rule
+					and candidate.line == finding.line
+					and candidate.col == finding.col
+			end, changes)
+			finishFix(changes)
+		end)
 		if changes[1] then
 			reveal(changes[1])
 		end
@@ -509,27 +645,38 @@ function App.mount(host: Instance, options: Options?): Controller
 		end
 	end
 
+	-- Takes back the last fix step: every script it changed gets its old text, unless the
+	-- script was edited after the fix.
 	local function undoFixes()
-		if scanning or #lastChanges == 0 then
-			return
-		end
-		local restored, skipped = 0, 0
-		for _, change in lastChanges do
-			local stillOurs = change.script.Parent ~= nil and readSource(change.script) == change.after
-			local undoing = Checker.reverseFixes(change.before, change.fixes)
-			if stillOurs and writeChange(change.script, change.after, change.before, undoing) then
-				restored += 1
-			else
-				skipped += 1
+		exclusive(function()
+			if #undoSteps == 0 or not canEdit() then
+				return
 			end
-		end
-		lastChanges = {}
-		local text = `Put the old text back in {plural(restored, "script")}.`
-		if skipped > 0 then
-			text ..= ` {plural(skipped, "script")} changed after the fix and were left alone.`
-		end
-		notice = text
-		runScan()
+			local step = table.remove(undoSteps) :: { Change }
+			local restored, skipped = 0, 0
+			for _, change in step do
+				local ok, done = pcall(function()
+					local stillOurs = change.script.Parent ~= nil and readSource(change.script) == change.after
+					local undoing = Checker.reverseFixes(change.before, change.fixes)
+					return stillOurs and writeChange(change.script, change.after, change.before, undoing)
+				end)
+				if ok and done then
+					restored += 1
+				else
+					skipped += 1
+				end
+			end
+			local text = `Put the old text back in {plural(restored, "script")}.`
+			if skipped > 0 then
+				text ..= ` {plural(skipped, "script")} changed after the fix and were left alone.`
+			end
+			if #undoSteps > 0 then
+				text ..= ` Press “Undo fixes” again to take back the fix before that ({#undoSteps} left).`
+			end
+			notice = text
+			noticeColor = SUCCESS
+			runScan()
+		end)
 	end
 
 	local function openAt(container: LuaSourceContainer, line: number, col: number)
@@ -568,6 +715,13 @@ function App.mount(host: Instance, options: Options?): Controller
 			pair[1].TextColor3 = buttonText
 			pair[2].Color = border
 		end
+	end
+
+	-- Buttons look pressed-out while an action runs; clicks are ignored then anyway.
+	local function setEnabled(button: TextButton, enabled: boolean)
+		button.AutoButtonColor = enabled
+		button.BackgroundTransparency = if enabled then 0 else 0.5
+		button.TextTransparency = if enabled then 0 else 0.5
 	end
 
 	local function makeRow(result: Result, order: number)
@@ -660,7 +814,7 @@ function App.mount(host: Instance, options: Options?): Controller
 			openAt(result.script, finding.line, finding.col)
 		end)
 
-		if finding.fix then
+		if finding.fix and canEdit() then
 			local fixButton = create("TextButton", {
 				Name = "Fix",
 				Text = "Fix",
@@ -675,6 +829,7 @@ function App.mount(host: Instance, options: Options?): Controller
 				ZIndex = 2,
 				Parent = row,
 			}, { corner(5) })
+			setEnabled(fixButton, not busy)
 			fixButton.MouseButton1Click:Connect(function()
 				task.spawn(fixOne, result)
 			end)
@@ -743,10 +898,33 @@ function App.mount(host: Instance, options: Options?): Controller
 		end
 		filterRow.Visible = hasScanned and #results > 0
 
-		noticeLabel.Text = notice or ""
-		noticeLabel.Visible = notice ~= nil
+		local editable = canEdit()
+		local confirming = os.clock() < confirmUntil
+		local fixScripts: { [LuaSourceContainer]: boolean } = {}
+		local fixScriptCount = 0
+		for _, result in results do
+			if result.finding.fix and not fixScripts[result.script] then
+				fixScripts[result.script] = true
+				fixScriptCount += 1
+			end
+		end
 
-		if not hasScanned then
+		if confirming then
+			noticeLabel.Text = `This changes {plural(fixable, "place")} in {plural(fixScriptCount, "script")}. `
+				.. "Ctrl+Z will not undo it; “Undo fixes” in this panel will, until Studio is closed. "
+				.. "Click the button again to go ahead."
+			noticeLabel.BackgroundColor3 = WARNING
+		else
+			noticeLabel.Text = notice or ""
+			noticeLabel.BackgroundColor3 = noticeColor
+		end
+		noticeLabel.Visible = confirming or notice ~= nil
+
+		if busy and progress then
+			statusLabel.Text = progress
+		elseif busy then
+			statusLabel.Text = "Working…"
+		elseif not hasScanned then
 			statusLabel.Text = "Checks every script in this place: free models you inserted, old code and new code."
 			makeEmptyRow("Press “Scan place” to start. Nothing is changed until you press a Fix button.")
 		elseif scannedScripts == 0 then
@@ -764,15 +942,21 @@ function App.mount(host: Instance, options: Options?): Controller
 			if visibleTotal > shown then
 				text ..= ` Showing the first {shown}.`
 			end
+			if not editable then
+				text ..= " The game is running: fixes are off until you stop it (changes now would be lost)."
+			end
 			statusLabel.Text = text
 			if visibleTotal == 0 then
 				makeEmptyRow("All findings are hidden by the filters above. Click a filter to show it again.")
 			end
 		end
 
-		fixAllButton.Text = `Fix {fixable} safe`
-		fixAllButton.Visible = fixable > 0
-		undoButton.Visible = #lastChanges > 0
+		fixAllButton.Text = if confirming then `Yes, fix {fixable}` else `Fix {fixable} safe`
+		fixAllButton.Visible = fixable > 0 and editable
+		undoButton.Visible = #undoSteps > 0 and editable
+		for _, button in { scanButton, fixAllButton, undoButton } do
+			setEnabled(button, not busy)
+		end
 	end
 
 	for order, severity in SEVERITIES do
@@ -799,8 +983,23 @@ function App.mount(host: Instance, options: Options?): Controller
 	scanButton.MouseButton1Click:Connect(function()
 		task.spawn(scan)
 	end)
+	-- the first click asks, the second (within a few seconds) fixes
 	fixAllButton.MouseButton1Click:Connect(function()
-		task.spawn(fixAll)
+		if busy then
+			return
+		end
+		if os.clock() < confirmUntil then
+			task.spawn(fixAll)
+			return
+		end
+		confirmUntil = os.clock() + CONFIRM_SECONDS
+		render()
+		task.delay(CONFIRM_SECONDS, function()
+			if not destroyed and not busy and confirmUntil ~= 0 and os.clock() >= confirmUntil then
+				confirmUntil = 0
+				render()
+			end
+		end)
 	end)
 	undoButton.MouseButton1Click:Connect(function()
 		task.spawn(undoFixes)
@@ -825,6 +1024,10 @@ function App.mount(host: Instance, options: Options?): Controller
 		undoFixes = undoFixes,
 		fixOneAt = fixOneAt,
 		destroy = function()
+			if destroyed then
+				return
+			end
+			destroyed = true
 			for _, connection in connections do
 				connection:Disconnect()
 			end

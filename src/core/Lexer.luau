@@ -154,7 +154,7 @@ function Lexer.tokenize(source: string): { Token }
 			end
 			if not numberEnd then
 				_, numberEnd = string.find(source, "^[%d_]*%.?[%d_]*", pos)
-				local _, exponentEnd = string.find(source, "^[eE][+-]?%d+", (numberEnd :: number) + 1)
+				local _, exponentEnd = string.find(source, "^[eE][+-]?%d+", (numberEnd or pos - 1) + 1)
 				numberEnd = exponentEnd or numberEnd
 			end
 			local stop = math.max(numberEnd :: number, pos)

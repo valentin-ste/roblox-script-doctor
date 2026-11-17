@@ -1,0 +1,12 @@
+{
+	"name": "ScriptDoctor",
+	"tree": {
+		"$path": "src/plugin",
+		"Core": {
+			"$path": "src/core"
+		},
+		"TestHooks": {
+			"$path": "tests/studio/TestHooks.luau"
+		}
+	}
+}
