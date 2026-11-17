@@ -87,7 +87,15 @@ and restart Studio.
 ## Development
 
 The checker core (`src/core`) is plain Luau with no Roblox API, tested with
-[Lune](https://lune-org.github.io/docs):
+[Lune](https://lune-org.github.io/docs). Test data:
+
+- `tests/fixtures` — small scripts with the expected findings marked on each line;
+- `tests/samples` — scripts written by AI assistants (Claude Sonnet, Claude Haiku, OpenAI Codex)
+  for 20 typical beginner requests, with the problems a person found in them in
+  `tests/labels.csv`;
+- the checker was also measured on 407 scripts from popular free models and on two popular
+  admin frameworks. That is other people's code, so it is not in this repository; the test runner
+  skips those steps when the folder is missing.
 
 ```sh
 lune run tests/run.luau            # fixtures, fix/undo, sample snapshots, hand labels
@@ -101,3 +109,7 @@ selene --config selene-plugin.toml src/plugin tests/studio
 The plugin shell (`src/plugin`) is tested in Studio: build with
 `rojo build test.project.json -o build/ScriptDoctor-test.rbxm` (adds the automation hook in
 `tests/studio/TestHooks.luau`; its panel is titled “Script Doctor (test build)”) and run `tests/studio/e2e.luau`; see the comment at its top.
+
+## License
+
+MIT, see `LICENSE`.

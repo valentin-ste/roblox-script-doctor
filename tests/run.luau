@@ -9,17 +9,21 @@
 	   unmarked lines must produce none. A line `--# scriptKind: client` anywhere in the file
 	   passes that option to the checker, the way the plugin does.
 	2. Fix fixtures (name.fixed.lua): applying all fixes to name.lua must give that text.
-	3. Sample sets (research/samples/<set>): findings are compared with a reviewed
-	   snapshot in tests/snapshots/<set>.txt, so any change in behaviour is visible.
+	3. Sample sets: findings are compared with a reviewed snapshot, so any change in behaviour
+	   is visible. tests/samples/<set> are scripts written by AI assistants (Claude Sonnet,
+	   Claude Haiku, OpenAI Codex) for 20 beginner requests; snapshots in tests/snapshots.
 	   Two popular admin frameworks (free-models/_frameworks, 1 390 scripts) are too big for a
 	   line-by-line snapshot: their counts per rule are, checked the way the plugin checks a
 	   place (with the method names of all of them).
-	4. Hand labels (research/labels.csv): for the AI sample sets, how many labelled problems
+	4. Hand labels (tests/labels.csv): for the AI sample sets, how many labelled problems
 	   are caught and missed, and how many findings have no label. A miss or a finding without
 	   a label fails: label it (or fix the rule) before updating the snapshots.
-	5. Verdicts on free models (research/labels-free-models.csv): every security and bug
-	   finding there was read by a person and marked real / unsure / false. Prints precision
-	   per rule; a security or bug finding without a verdict fails.
+	5. Private data (research/, not in the public repository): 407 scripts from popular free
+	   models and two popular admin frameworks are other people's code, so they are
+	   not published. When research/ is there, they are checked against research/snapshots,
+	   and research/labels-free-models.csv (every security and bug finding there read by a
+	   person and marked real / unsure / false) prints the precision per rule; a security or
+	   bug finding without a verdict fails. Without research/ these steps are skipped.
 ]]
 local fs = require("@lune/fs")
 local process = require("@lune/process")
@@ -196,11 +200,10 @@ end
 -- 3: sample sets ---------------------------------------------------------------
 type Labelled = { file: string, line: number, rule: string, severity: string? }
 
-local function runSet(set: string, mustMatch: boolean): { Labelled }
-	local folder = "research/samples/" .. set
+local function runSet(set: string, folder: string, snapshotPath: string): { Labelled }
 	local found: { Labelled } = {}
 	if not fs.isDir(folder) then
-		print("samples: " .. set .. " — folder not found, skipped")
+		print("samples: " .. set .. " — " .. folder .. " not found, skipped")
 		return found
 	end
 	local lines = {}
@@ -229,7 +232,6 @@ local function runSet(set: string, mustMatch: boolean): { Labelled }
 		end
 	end
 	local text = table.concat(lines, "\n") .. "\n"
-	local snapshotPath = "tests/snapshots/" .. set .. ".txt"
 	print(string.format("samples: %s — files %d, findings %d, crashes %d", set, fileCount, total, crashed))
 	local rules = {}
 	for rule in perRule do
@@ -251,7 +253,7 @@ local function runSet(set: string, mustMatch: boolean): { Labelled }
 	if update or not fs.isFile(snapshotPath) then
 		fs.writeFile(snapshotPath, text)
 		print("  snapshot written: " .. snapshotPath)
-	elseif mustMatch and fs.readFile(snapshotPath) ~= text then
+	elseif fs.readFile(snapshotPath) ~= text then
 		fs.writeFile(snapshotPath .. ".actual", text)
 		fail(set .. ": findings differ from snapshot (see " .. snapshotPath .. ".actual)")
 	end
@@ -259,7 +261,7 @@ local function runSet(set: string, mustMatch: boolean): { Labelled }
 end
 
 -- 3b: counts per rule on the two admin frameworks, as one place
-local function runSummary(folder: string, snapshotName: string)
+local function runSummary(folder: string, snapshotPath: string)
 	if not fs.isDir(folder) then
 		print("summary: " .. folder .. " — folder not found, skipped")
 		return
@@ -302,7 +304,6 @@ local function runSummary(folder: string, snapshotName: string)
 		table.insert(lines, string.format("%5d  fixable %4d  %s", counts[key].total, counts[key].fixable, key))
 	end
 	local text = table.concat(lines, "\n") .. "\n"
-	local snapshotPath = "tests/snapshots/" .. snapshotName .. ".txt"
 	print(`summary: {folder} — scripts {#sources}, findings {total}, crashes {crashed}`)
 	checks += 1
 	if crashed > 0 then
@@ -352,7 +353,7 @@ local function csvFields(line: string): { string }
 end
 
 local function compareWithLabels(sets: { string }, foundBySet: { [string]: { Labelled } })
-	local labelPath = "research/labels.csv"
+	local labelPath = "tests/labels.csv"
 	if not fs.isFile(labelPath) then
 		print("labels: " .. labelPath .. " not found, skipped")
 		return
@@ -377,7 +378,7 @@ local function compareWithLabels(sets: { string }, foundBySet: { [string]: { Lab
 		end
 	end
 
-	print("labels (research/labels.csv, problems a person marked in AI code)")
+	print("labels (tests/labels.csv, problems a person marked in AI code)")
 	for _, set in sets do
 		local found = foundBySet[set] or {}
 		local used: { [number]: boolean } = {}
@@ -435,8 +436,8 @@ end
 -- 5: verdicts on free models ---------------------------------------------------------
 local function compareWithVerdicts(found: { Labelled })
 	local path = "research/labels-free-models.csv"
-	if not fs.isFile(path) then
-		print("verdicts: " .. path .. " not found, skipped")
+	if not fs.isFile(path) or #found == 0 then
+		print("verdicts: " .. path .. " or the free models not found, skipped")
 		return
 	end
 	-- "file:line:rule" -> verdicts (one per finding; a line can have two findings)
@@ -506,13 +507,13 @@ local function compareWithVerdicts(found: { Labelled })
 	end
 end
 
-local foundBySet = {
-	sonnet = runSet("sonnet", true),
-	haiku = runSet("haiku", true),
-	codex = runSet("codex", true),
-}
-local freeModels = runSet("free-models", true)
-runSummary("research/samples/free-models/_frameworks", "frameworks-summary")
+local foundBySet = {}
+for _, set in { "sonnet", "haiku", "codex" } do
+	foundBySet[set] = runSet(set, "tests/samples/" .. set, "tests/snapshots/" .. set .. ".txt")
+end
+-- private: other people's code, kept in research/ (see 5 above)
+local freeModels = runSet("free-models", "research/samples/free-models", "research/snapshots/free-models.txt")
+runSummary("research/samples/free-models/_frameworks", "research/snapshots/frameworks-summary.txt")
 compareWithLabels({ "sonnet", "haiku", "codex" }, foundBySet)
 compareWithVerdicts(freeModels)
 

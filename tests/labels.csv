@@ -1,0 +1,99 @@
+file,line,category,severity,description,fixable_automatically,confidence
+sonnet/01-leaderstats.lua,0,clean,,Проблем не найдено,,sure
+sonnet/02-save-data.lua,69,bindtoclose-fixed-wait,bug,"В BindToClose сохранения запущены через task.spawn, а дальше просто ждём 3 секунды: если DataStore отвечает дольше, сервер закроется раньше, чем данные сохранятся; правильно — дождаться конца всех сохранений",no,maybe
+sonnet/03-shop-server.lua,3,unused-variable,style,"Переменная Players объявлена и не используется (при ручном чтении пропущена, нашёл selene); в остальном чисто: цена и наличие меча проверяются на сервере",yes,sure
+sonnet/03-shop-client.lua,0,clean,,Проблем не найдено,,sure
+sonnet/04-rounds.lua,0,clean,,Проблем не найдено; while true без паузы в теле — пауза внутри вызываемой функции countdown (краевой случай для нашей проверки циклов),,sure
+sonnet/05-coin-button.lua,0,clean,,"Проблем не найдено: задержка по игроку есть, запись чистится при выходе",,sure
+sonnet/06-pet.lua,56,playeradded-no-existing-players,bug,"PlayerAdded подключён, но игроки и персонажи, которые уже есть к моменту запуска скрипта, не обрабатываются (нет цикла по Players:GetPlayers() и проверки player.Character) — у такого игрока питомец не появится",no,maybe
+sonnet/06-pet.lua,29,server-per-frame-movement,perf,"Питомец двигается на сервере в каждом кадре (Heartbeat) отдельным подключением на каждого игрока: каждое изменение CFrame рассылается всем клиентам, движение выйдет дёрганым; обычно это делают на клиенте",no,maybe
+sonnet/06-pet.lua,21,unused-variable,style,Параметр player в onCharacterAdded не используется,no,sure
+sonnet/07-double-jump.lua,31,logic,bug,"JumpRequest срабатывает много раз, пока пробел зажат; второй прыжок сработает сразу после первого без повторного нажатия — нет проверки, что клавишу отпустили, или задержки",no,maybe
+sonnet/08-dash-client.lua,0,clean,,Проблем не найдено,,sure
+sonnet/08-dash-server.lua,36,network-ownership,bug,"ApplyImpulse вызывается на сервере для персонажа игрока, физикой которого управляет клиент: по сообщениям разработчиков такой толчок с сервера часто не срабатывает; рывок обычно применяют на клиенте, а сервер только проверяет",no,maybe
+sonnet/09-sword.lua,3,unused-variable,style,"Переменная Players объявлена и не используется (при ручном чтении пропущена, нашёл selene); в остальном чисто: урон считается на сервере",yes,sure
+sonnet/10-daily-reward.lua,0,clean,,"Проблем не найдено: UpdateAsync в pcall, функция внутри не ждёт",,sure
+sonnet/11-vip-door.lua,46,logic,bug,"Дверь открывается на сервере (CanCollide = false) для всех: пока она открыта 3 секунды, пройдёт любой игрок без VIP; нужно открывать только у владельца (на клиенте или через группы столкновений)",no,sure
+sonnet/11-vip-door.lua,41,touched-no-debounce,bug,"Окно покупки вызывается на каждое касание двери без задержки — у игрока без VIP оно будет всплывать снова и снова, пока он стоит у двери",no,maybe
+sonnet/12-round-timer-server.lua,0,clean,,Проблем не найдено,,sure
+sonnet/12-round-timer-client.lua,0,clean,,Проблем не найдено,,sure
+sonnet/13-chase-npc.lua,0,clean,,Проблем не найдено,,sure
+sonnet/14-clicker-server.lua,0,clean,,"Проблем не найдено: монеты считает сервер, есть защита от слишком частых кликов",,sure
+sonnet/14-clicker-client.lua,0,clean,,Проблем не найдено,,sure
+sonnet/15-teleport.lua,0,clean,,Проблем не найдено,,sure
+sonnet/16-inventory-module.lua,3,unused-variable,style,Переменная Players объявлена и не используется,yes,sure
+sonnet/16-inventory-module.lua,42,player-left-during-yield,perf,"Если игрок вышел, пока шла загрузка из DataStore, запись в inventories создаётся уже после Cleanup и остаётся в памяти до конца работы сервера",no,maybe
+sonnet/16-inventory-server.lua,39,bindtoclose-fixed-wait,bug,"В BindToClose сохранения запущены через task.spawn, дальше ждём фиксированные 3 секунды вместо ожидания конца сохранений",no,maybe
+sonnet/17-anticheat.lua,50,logic,bug,"Античит не отличает законные телепорты, которые делает сама игра (раунды, платформы), от читов: несколько таких подряд — и честного игрока выкинет",no,maybe
+sonnet/18-falling-coins.lua,25,logic,bug,"Монета не закреплена и CanCollide = false: она пролетает сквозь землю и исчезает внизу, собрать её можно только в полёте",no,maybe
+sonnet/19-checkpoints.lua,97,bindtoclose-fixed-wait,bug,"В BindToClose сохранения запущены через task.spawn, дальше ждём фиксированные 3 секунды вместо ожидания конца сохранений",no,maybe
+sonnet/19-checkpoints.lua,21,spawn-teleport-race,bug,Персонаж переносится на чекпоинт сразу при появлении; движок в этот момент сам ставит его на точку возрождения и может перебить перенос,no,maybe
+sonnet/20-global-leaderboard.lua,42,race-nil-arithmetic,bug,"Если запись в DataStore не удалась, а игрок за это время вышел (pending[userId] уже nil), строка упадёт с ошибкой сложения nil с числом и остановит главный цикл обновления таблицы",no,maybe
+sonnet/20-global-leaderboard.lua,112,bindtoclose-fixed-wait,bug,"В BindToClose отправки запущены через task.spawn, дальше ждём фиксированные 3 секунды вместо ожидания конца",no,maybe
+haiku/01-leaderstats.lua,5,playeradded-no-existing-players,bug,"PlayerAdded подключён, игроки, которые уже есть к запуску скрипта, не обрабатываются (нет цикла по Players:GetPlayers())",no,maybe
+haiku/02-save-data.lua,19,datastore-save-after-failed-load,bug,"Если загрузка из DataStore не удалась, скрипт просто выходит и нигде это не запоминает; при выходе игрока сохранятся нули поверх настоящих данных — потеря прогресса",no,sure
+haiku/02-save-data.lua,11,playeradded-no-existing-players,bug,"PlayerAdded подключён, уже зашедшие игроки не обрабатываются",no,maybe
+haiku/03-shop-server.lua,0,clean,,Проблем не найдено: цена проверяется на сервере,,sure
+haiku/03-shop-client.lua,0,clean,,Проблем не найдено,,sure
+haiku/04-round-system.lua,0,clean,,Проблем не найдено; пауза цикла внутри вызываемой функции runPhase,,sure
+haiku/05-coin-button.lua,0,clean,,Проблем не найдено,,sure
+haiku/06-pet-follow.lua,22,playeradded-no-existing-players,bug,"PlayerAdded подключён, уже зашедшие игроки не обрабатываются — у них питомца не будет",no,maybe
+haiku/06-pet-follow.lua,33,server-per-frame-movement,perf,"Питомцы всех игроков двигаются на сервере в каждом кадре; каждое изменение рассылается всем клиентам, движение выйдет дёрганым",no,maybe
+haiku/07-double-jump.lua,32,logic,bug,"JumpRequest срабатывает много раз, пока пробел зажат: второй прыжок сработает сразу после первого без повторного нажатия",no,maybe
+haiku/08-dash-client.lua,0,clean,,Проблем не найдено,,sure
+haiku/08-dash-server.lua,45,undefined-variable,bug,"Переменная Players используется, но нигде не объявлена: скрипт упадёт с ошибкой на этой строке (обработчик рывка при этом уже подключён и работает, не чистится только таблица)",yes,sure
+haiku/08-dash-server.lua,42,network-ownership,bug,"Скорость персонажа задаётся на сервере, хотя физикой персонажа управляет клиент: рывок может не сработать или дёрнуться",no,maybe
+haiku/09-sword-damage.lua,0,clean,,Проблем не найдено,,sure
+haiku/10-daily-reward.lua,46,pcall-result-ignored,bug,"Результат сохранения не проверяется: если запись в DataStore не удалась, игрок получит награду ещё раз при следующем заходе",no,maybe
+haiku/10-daily-reward.lua,15,playeradded-no-existing-players,bug,"PlayerAdded подключён, уже зашедшие игроки не обрабатываются",no,maybe
+haiku/10-daily-reward.lua,42,logic,bug,"Награда прибавляется к монетам, а скрипт сохранения из просьбы 2 в это же время может записать в монеты загруженное значение и стереть награду (автор сам предупреждает об этом в комментарии)",no,maybe
+haiku/11-vip-door.lua,34,logic,bug,"Дверь открывается на сервере (CanCollide = false) для всех: пока она открыта 3 секунды, пройдёт любой игрок без VIP",no,sure
+haiku/11-vip-door.lua,18,logic,bug,"Если проверка геймпасса не удалась из-за сбоя, в кэш навсегда пишется «не VIP» — владельца не пустит до перезахода; кэш не чистится при выходе",no,maybe
+haiku/12-round-timer-gui.lua,13,polling-instead-of-event,perf,Текст обновляется опросом 5 раз в секунду вместо события GetAttributeChangedSignal,no,maybe
+haiku/13-npc-chase.lua,0,clean,,Проблем не найдено,,sure
+haiku/14-clicker-server.lua,0,clean,,Проблем не найдено,,sure
+haiku/14-clicker-client.lua,0,clean,,Проблем не найдено,,sure
+haiku/15-teleport-platforms.lua,23,player-table-never-cleared,perf,Записи в таблице lastTeleport по игрокам не удаляются при выходе — память растёт весь срок работы сервера,no,maybe
+haiku/16-inventory-server.lua,60,datastore-save-after-failed-load,bug,"Если загрузка инвентаря не удалась, остаётся пустой инвентарь, и при выходе он сохраняется поверх настоящего — потеря предметов",no,sure
+haiku/16-inventory-server.lua,51,playeradded-no-existing-players,bug,"PlayerAdded подключён, уже зашедшие игроки не обрабатываются",no,maybe
+haiku/16-inventory-server.lua,27,unused-variable,style,Функции addItem и removeSlot объявлены и не используются (задуманы как заготовка для других скриптов),no,sure
+haiku/16-inventory-client.lua,0,clean,,Проблем не найдено,,sure
+haiku/17-anticheat-speed.lua,38,logic,bug,Античит не отличает законные телепорты самой игры от читов: несколько подряд — и честного игрока выкинет,no,maybe
+haiku/18-falling-coins.lua,0,clean,,Проблем не найдено,,sure
+haiku/19-obby-checkpoints.lua,31,datastore-save-after-failed-load,bug,"Если загрузка не удалась, прогресс считается нулевым, и при выходе ноль сохраняется поверх настоящего чекпоинта",no,sure
+haiku/19-obby-checkpoints.lua,33,characteradded-after-yield,bug,"CharacterAdded подключается после ожидания ответа DataStore: первый персонаж к этому времени уже мог появиться, и его на чекпоинт не перенесёт (нет проверки player.Character)",no,maybe
+haiku/19-obby-checkpoints.lua,27,playeradded-no-existing-players,bug,"PlayerAdded подключён, уже зашедшие игроки не обрабатываются",no,maybe
+haiku/20-global-leaderboard.lua,0,clean,,Проблем не найдено,,sure
+codex/1-leaderstats.lua,0,clean,,Проблем не найдено,,sure
+codex/2-save-player-stats.lua,39,datastore-save-after-failed-load,bug,"Если загрузка из DataStore не удалась, это нигде не запоминается; при выходе игрока сохранятся значения по умолчанию поверх настоящих — потеря прогресса",no,sure
+codex/2-save-player-stats.lua,59,playeradded-no-existing-players,bug,"PlayerAdded подключён, уже зашедшие игроки не обрабатываются",no,maybe
+codex/3-shop-server.lua,0,clean,,Проблем не найдено: цена проверяется на сервере,,sure
+codex/3-shop-client.lua,0,clean,,Проблем не найдено,,sure
+codex/4-round-system.lua,0,clean,,Проблем не найдено; пауза цикла внутри вызываемой функции runTimer,,sure
+codex/5-coin-button.lua,0,clean,,Проблем не найдено,,sure
+codex/6-pet-follow.lua,51,playeradded-no-existing-players,bug,"PlayerAdded подключён, уже зашедшие игроки и уже появившиеся персонажи не обрабатываются",no,maybe
+codex/6-pet-follow.lua,35,server-per-frame-movement,perf,Питомец двигается на сервере в каждом кадре отдельным подключением на игрока; после смерти персонажа подключение продолжает срабатывать вхолостую до следующего появления,no,maybe
+codex/7-double-jump.lua,22,logic,bug,"JumpRequest срабатывает много раз, пока пробел зажат: через 0,1 с после начала падения второй прыжок сработает без повторного нажатия",no,maybe
+codex/8-dash-server.lua,42,network-ownership,bug,"Скорость персонажа задаётся на сервере, хотя физикой персонажа управляет клиент: рывок может не сработать или дёрнуться",no,maybe
+codex/8-dash-server.lua,39,player-table-never-cleared,perf,Записи в таблице lastDash по игрокам не удаляются при выходе,no,maybe
+codex/8-dash-client.lua,0,clean,,Проблем не найдено,,sure
+codex/9-sword-damage.lua,0,clean,,Проблем не найдено,,sure
+codex/10-daily-reward.lua,39,pcall-result-ignored,bug,"Результат сохранения не проверяется: если запись в DataStore не удалась, игрок получит награду ещё раз при следующем заходе",no,maybe
+codex/10-daily-reward.lua,28,playeradded-no-existing-players,bug,"PlayerAdded подключён, уже зашедшие игроки не обрабатываются",no,maybe
+codex/10-daily-reward.lua,37,logic,bug,"Награда прибавляется к монетам, а скрипт сохранения из просьбы 2 в это же время может записать в монеты загруженное значение и стереть награду",no,maybe
+codex/11-vip-door.lua,25,logic,bug,"Дверь открывается на сервере (CanCollide = false) для всех: пока она открыта 3 секунды, пройдёт любой игрок без VIP",no,sure
+codex/12-round-timer-server.lua,0,clean,,Проблем не найдено,,sure
+codex/12-round-timer-client.lua,0,clean,,Проблем не найдено,,sure
+codex/13-npc-chase.lua,0,clean,,Проблем не найдено,,sure
+codex/14-clicker-server.lua,30,remote-no-rate-limit,security,Клик начисляет монеты без ограничения частоты: программа-кликер может слать событие сотни раз в секунду,no,maybe
+codex/14-clicker-server.lua,15,playeradded-no-existing-players,bug,"PlayerAdded подключён, уже зашедшие игроки не обрабатываются (здесь почти безвредно: сила клика по умолчанию берётся как 1)",no,maybe
+codex/14-clicker-client.lua,0,clean,,Проблем не найдено,,sure
+codex/15-platform-teleport.lua,0,clean,,Проблем не найдено,,sure
+codex/16-inventory-save.lua,31,datastore-save-after-failed-load,bug,"Результат загрузки вообще не проверяется: при сбое создаётся пустой инвентарь, и при выходе он сохраняется поверх настоящего — потеря предметов",no,sure
+codex/16-inventory-save.lua,57,playeradded-no-existing-players,bug,"PlayerAdded подключён, уже зашедшие игроки не обрабатываются",no,maybe
+codex/17-speed-anticheat.lua,33,logic,bug,"Кик с первого же превышения скорости: любой перенос игрока самой игрой (чекпоинт, платформа-телепорт) выкинет честного игрока",no,maybe
+codex/17-speed-anticheat.lua,42,playeradded-no-existing-players,bug,"PlayerAdded подключён, уже зашедшие игроки и уже появившиеся персонажи не обрабатываются",no,maybe
+codex/18-falling-coins.lua,16,logic,bug,"Монета не закреплена и CanCollide = false: она пролетает сквозь землю, собрать её можно только в полёте",no,maybe
+codex/19-obby-checkpoints.lua,66,datastore-save-after-failed-load,bug,"Результат загрузки не проверяется: при сбое прогресс считается нулевым, и первое же касание чекпоинта сохранит меньший номер поверх настоящего",no,sure
+codex/19-obby-checkpoints.lua,62,playeradded-no-existing-players,bug,"PlayerAdded подключён, уже зашедшие игроки не обрабатываются",no,maybe
+codex/20-global-leaderboard.lua,82,datastore-no-bindtoclose,bug,"Очки отправляются при выходе игрока и раз в минуту, но не при остановке сервера: последние изменения перед остановкой могут не попасть в таблицу",no,maybe
