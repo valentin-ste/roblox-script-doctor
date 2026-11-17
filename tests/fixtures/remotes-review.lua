@@ -89,3 +89,36 @@ Handlers.give = function(player, amount)
 	player.leaderstats.Coins.Value += amount --! remote-client-value
 end
 ReplicatedStorage.Give8.OnServerEvent:Connect(Handlers.give)
+
+-- Fine: capped by an assignment in the branch.
+ReplicatedStorage.Give9.OnServerEvent:Connect(function(player, amount)
+	if typeof(amount) ~= "number" or amount < 0 then
+		return
+	end
+	if amount > MAX_GIFT then
+		amount = MAX_GIFT
+	end
+	player.leaderstats.Coins.Value += amount
+end)
+
+-- The limit is skipped for some players: no limit.
+ReplicatedStorage.Give10.OnServerEvent:Connect(function(player, amount, isVip)
+	if amount > MAX_GIFT and not isVip then
+		return
+	end
+	player.leaderstats.Coins.Value += amount --! remote-client-value
+end)
+
+-- A guard joined with `or` does not limit the write inside it.
+ReplicatedStorage.Give11.OnServerEvent:Connect(function(player, amount)
+	if amount <= MAX_GIFT or player.UserId == game.CreatorId then
+		player.leaderstats.Coins.Value += amount --! remote-client-value
+	end
+end)
+
+-- Fine: checked to be a colour, not a number; there is nothing to limit.
+ReplicatedStorage.Paint.OnServerEvent:Connect(function(player, color)
+	if typeof(color) == "Color3" then
+		player.Settings.Color.Value = color
+	end
+end)

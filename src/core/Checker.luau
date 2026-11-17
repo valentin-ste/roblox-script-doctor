@@ -973,8 +973,10 @@ function Checker.check(source: string, options: Options?): { Finding }
 
 	-- part:FindFirstChild("X"):Destroy() / part:FindFirstChild("X").Value
 	local function checkFindFirstChild(index: number, name: string)
-		-- `script:FindFirstChild("Config")`: the script's own children come with it; and inside
-		-- pcall a missing object stops nothing
+		-- `script:FindFirstChild("Config")`, `script:FindFirstAncestor("MyModel")`: the script's
+		-- own children and the model around it come with it (a find on `script` fails only after
+		-- someone renames or deletes part of the model); and inside pcall a missing object
+		-- stops nothing
 		local ownChild = isName(index - 2, "script") and not isSymbol(index - 3, ".")
 		if ownChild or insideProtected(index) then
 			return
@@ -1256,6 +1258,9 @@ function Checker.check(source: string, options: Options?): { Finding }
 		-- `if` / `elseif` conditions the `then` that ends them
 		local inCondition: { [number]: boolean } = {}
 		local conditionThen: { [number]: number } = {}
+		-- per `then`: the condition joins parts with `and` / `or` (outside parentheses)
+		local joinedByAnd: { [number]: boolean } = {}
+		local joinedByOr: { [number]: boolean } = {}
 		local conditionOpen = false
 		local pending: { number } = {}
 		for inner = bodyStart, finish - 1 do
@@ -1264,8 +1269,18 @@ function Checker.check(source: string, options: Options?): { Finding }
 				pending = {}
 			elseif isKeyword(inner, "then") or isKeyword(inner, "do") then
 				if isKeyword(inner, "then") then
+					local depth = 0
 					for _, cursor in pending do
 						conditionThen[cursor] = inner
+						if isSymbol(cursor, "(") or isSymbol(cursor, "[") or isSymbol(cursor, "{") then
+							depth += 1
+						elseif isSymbol(cursor, ")") or isSymbol(cursor, "]") or isSymbol(cursor, "}") then
+							depth -= 1
+						elseif depth == 0 and isKeyword(cursor, "and") then
+							joinedByAnd[inner] = true
+						elseif depth == 0 and isKeyword(cursor, "or") then
+							joinedByOr[inner] = true
+						end
 					end
 				end
 				conditionOpen = false
@@ -1281,8 +1296,10 @@ function Checker.check(source: string, options: Options?): { Finding }
 			end
 		end
 
-		-- `if <condition> then return end`: the code below runs when the condition is false
-		local function branchRejects(thenIndex: number): boolean
+		-- `if <condition> then return end` / `if <condition> then amount = 100 end`: when the
+		-- condition holds, the value does not go on as it was, so the code below has the
+		-- opposite of the condition
+		local function branchOverrides(thenIndex: number, param: string): boolean
 			local block = blockAt[thenIndex]
 			if not block or block.kind ~= "if" or not block.finish then
 				return false
@@ -1295,6 +1312,12 @@ function Checker.check(source: string, options: Options?): { Finding }
 						isKeyword(cursor, "return")
 						or (isName(cursor, "error") and isSymbol(cursor + 1, "("))
 						or isName(cursor, "Kick")
+						or (
+							isName(cursor, param)
+							and isSymbol(cursor + 1, "=")
+							and not isKeyword(cursor - 1, "local")
+							and not isSymbol(cursor - 1, ".")
+						)
 					then
 						return true
 					end
@@ -1326,8 +1349,16 @@ function Checker.check(source: string, options: Options?): { Finding }
 			-- "the value is at most X": amount < X, amount <= X, X > amount, X >= amount
 			local statesUpper = if paramLeft then less else not less
 			local thenIndex = conditionThen[inner]
-			if thenIndex and branchRejects(thenIndex) then
+			if thenIndex and branchOverrides(thenIndex, param) then
+				-- `if a > MAX or b then return end` limits a; with `and` (`a > MAX and not isVip`)
+				-- the check can be skipped
+				if joinedByAnd[thenIndex] then
+					return nil
+				end
 				statesUpper = not statesUpper
+			elseif thenIndex and joinedByOr[thenIndex] then
+				-- `if a <= MAX or isVip then <write> end`: the write can run without the limit
+				return nil
 			end
 			if statesUpper then
 				return "upper"
@@ -1346,6 +1377,9 @@ function Checker.check(source: string, options: Options?): { Finding }
 			-- sends a negative number and gains).
 			local checked, upper, lower = false, false, false
 			local needUpper, needLower = false, false
+			-- `typeof(color) == "Color3"`: checked to be something other than a number, so a
+			-- limit means nothing for it
+			local notNumber = false
 			local valueWrite: number?, sensitiveUse: number? = nil, nil
 			for inner = bodyStart, finish - 1 do
 				if not isName(inner, param) or isSymbol(inner - 1, ".") or isSymbol(inner - 1, ":") then
@@ -1357,6 +1391,16 @@ function Checker.check(source: string, options: Options?): { Finding }
 					and localTables[text(inner - 2)] == true
 				if inCondition[inner] or isCompared or isTableKey then
 					checked = true
+				end
+				if
+					(isName(inner - 2, "typeof") or isName(inner - 2, "type"))
+					and isSymbol(inner - 1, "(")
+					and isSymbol(inner + 1, ")")
+					and (isSymbol(inner + 2, "==") or isSymbol(inner + 2, "~="))
+					and kind(inner + 3) == "string"
+					and text(inner + 3) ~= "number"
+				then
+					notNumber = true
 				end
 				local bound = if isTableKey then "both" else comparisonBound(inner, param)
 				upper = upper or bound == "upper" or bound == "both"
@@ -1421,7 +1465,12 @@ function Checker.check(source: string, options: Options?): { Finding }
 			end
 			-- reported where the client value is used, not at the :Connect line: the handler
 			-- may be a named function far above
-			if valueWrite and needUpper and not upper then
+			if valueWrite and notNumber then
+				-- a Color3, a string, an Instance... checked by type; nothing to limit
+				if sensitiveUse and not checked then
+					add("remote-unvalidated-args", sensitiveUse, nil, param)
+				end
+			elseif valueWrite and needUpper and not upper then
 				add("remote-client-value", valueWrite, nil, param)
 			elseif valueWrite and needLower and not lower then
 				addVariant("remote-client-value", "subtract", valueWrite, nil, param)

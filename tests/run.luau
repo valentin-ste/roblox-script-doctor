@@ -11,6 +11,9 @@
 	2. Fix fixtures (name.fixed.lua): applying all fixes to name.lua must give that text.
 	3. Sample sets (research/samples/<set>): findings are compared with a reviewed
 	   snapshot in tests/snapshots/<set>.txt, so any change in behaviour is visible.
+	   Two popular admin frameworks (free-models/_frameworks, 1 390 scripts) are too big for a
+	   line-by-line snapshot: their counts per rule are, checked the way the plugin checks a
+	   place (with the method names of all of them).
 	4. Hand labels (research/labels.csv): for the AI sample sets, how many labelled problems
 	   are caught and missed, and how many findings have no label. A miss or a finding without
 	   a label fails: label it (or fix the rule) before updating the snapshots.
@@ -255,6 +258,65 @@ local function runSet(set: string, mustMatch: boolean): { Labelled }
 	return found
 end
 
+-- 3b: counts per rule on the two admin frameworks, as one place
+local function runSummary(folder: string, snapshotName: string)
+	if not fs.isDir(folder) then
+		print("summary: " .. folder .. " — folder not found, skipped")
+		return
+	end
+	local sources = {}
+	for _, name in sortedFiles(folder) do
+		table.insert(sources, fs.readFile(folder .. "/" .. name))
+	end
+	local members: { [string]: boolean } = {}
+	for _, source in sources do
+		for name in Checker.definedMembers(source) do
+			members[name] = true
+		end
+	end
+	local counts: { [string]: { total: number, fixable: number } } = {}
+	local total, crashed = 0, 0
+	for _, source in sources do
+		local ok, findings = pcall(Checker.check, source, { knownMembers = members })
+		if not ok then
+			crashed += 1
+			continue
+		end
+		for _, finding in findings do
+			local key = finding.severity .. " " .. finding.rule
+			counts[key] = counts[key] or { total = 0, fixable = 0 }
+			counts[key].total += 1
+			total += 1
+			if finding.fix then
+				counts[key].fixable += 1
+			end
+		end
+	end
+	local keys = {}
+	for key in counts do
+		table.insert(keys, key)
+	end
+	table.sort(keys)
+	local lines = { `scripts {#sources}, findings {total}, crashes {crashed}` }
+	for _, key in keys do
+		table.insert(lines, string.format("%5d  fixable %4d  %s", counts[key].total, counts[key].fixable, key))
+	end
+	local text = table.concat(lines, "\n") .. "\n"
+	local snapshotPath = "tests/snapshots/" .. snapshotName .. ".txt"
+	print(`summary: {folder} — scripts {#sources}, findings {total}, crashes {crashed}`)
+	checks += 1
+	if crashed > 0 then
+		fail(folder .. ": checker crashed on " .. crashed .. " files")
+	end
+	if update or not fs.isFile(snapshotPath) then
+		fs.writeFile(snapshotPath, text)
+		print("  snapshot written: " .. snapshotPath)
+	elseif fs.readFile(snapshotPath) ~= text then
+		fs.writeFile(snapshotPath .. ".actual", text)
+		fail(folder .. ": counts differ from snapshot (see " .. snapshotPath .. ".actual)")
+	end
+end
+
 -- 4: hand labels ------------------------------------------------------------------
 
 -- Fields of one CSV line ("a,b,\"c, with comma\",d").
@@ -450,6 +512,7 @@ local foundBySet = {
 	codex = runSet("codex", true),
 }
 local freeModels = runSet("free-models", true)
+runSummary("research/samples/free-models/_frameworks", "frameworks-summary")
 compareWithLabels({ "sonnet", "haiku", "codex" }, foundBySet)
 compareWithVerdicts(freeModels)
 
