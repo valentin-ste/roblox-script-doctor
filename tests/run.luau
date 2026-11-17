@@ -73,12 +73,18 @@ for _, name in sortedFiles("tests/fixtures") do
 	local source = fs.readFile("tests/fixtures/" .. name)
 	local options: Checker.Options = {}
 	local expected: { [string]: number } = {}
+	local expectedSeverity: { [string]: string } = {}
 	for lineNumber, line in splitLines(source) do
 		local marker = string.match(line, "%-%-! (.+)$")
 		if marker then
-			for rule in string.gmatch(marker, "[%w%-]+") do
-				local key = lineNumber .. ":" .. rule
+			-- `rule-id` or `rule-id@advice` (the severity is checked too)
+			for item in string.gmatch(marker, "[%w%-@]+") do
+				local rule, severity = string.match(item, "^([%w%-]+)@?(%a*)$")
+				local key = lineNumber .. ":" .. (rule or item)
 				expected[key] = (expected[key] or 0) + 1
+				if severity and severity ~= "" then
+					expectedSeverity[key] = severity
+				end
 			end
 		end
 		local kind = string.match(line, "^%-%-# scriptKind: (%a+)")
@@ -88,12 +94,15 @@ for _, name in sortedFiles("tests/fixtures") do
 	end
 	local findings = Checker.check(source, options)
 	local got: { [string]: number } = {}
+	checks += 1
+	local before = failures
 	for _, finding in findings do
 		local key = finding.line .. ":" .. finding.rule
 		got[key] = (got[key] or 0) + 1
+		if expectedSeverity[key] and expectedSeverity[key] ~= finding.severity then
+			fail(`{name}: {key} has severity {finding.severity}, expected {expectedSeverity[key]}`)
+		end
 	end
-	checks += 1
-	local before = failures
 	for key, count in expected do
 		if (got[key] or 0) < count then
 			fail(`{name}: expected {count}, got {got[key] or 0}: {key}`)
@@ -155,6 +164,26 @@ do
 	print(
 		string.format("fixes: %d ordered, positions and undo %s", #fixes, if restored == source then "ok" else "FAILED")
 	)
+end
+
+-- 2c: members defined in other scripts of the place switch the alias rules off ----------
+do
+	checks += 1
+	local classModule =
+		"local Enemy = {}\nfunction Enemy:takeDamage(n) end\nEnemy.destroy = function(self) end\nreturn Enemy\n"
+	local user = "local e = require(script.Parent.Enemy).new()\ne:takeDamage(10)\ne:destroy()\npart:clone()\n"
+	local members = Checker.definedMembers(classModule)
+	local findings = Checker.check(user, { knownMembers = members })
+	local rules = {}
+	for _, finding in findings do
+		table.insert(rules, finding.line .. ":" .. finding.rule)
+	end
+	local text = table.concat(rules, " ")
+	if text ~= "4:deprecated-method" then
+		fail("knownMembers: expected only the part:clone() finding, got: " .. text)
+	else
+		print("knownMembers: ok")
+	end
 end
 
 -- 3: sample sets ---------------------------------------------------------------

@@ -1,7 +1,7 @@
 -- Fixture: PlayerAdded without handling players who are already in the game.
 local Players = game:GetService("Players")
 
-Players.PlayerAdded:Connect(function(player) --! playeradded-no-existing-players
+Players.PlayerAdded:Connect(function(player) --! playeradded-no-existing-players@advice
 	local leaderstats = Instance.new("Folder")
 	leaderstats.Name = "leaderstats"
 	leaderstats.Parent = player

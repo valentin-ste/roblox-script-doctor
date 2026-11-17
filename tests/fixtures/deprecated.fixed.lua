@@ -5,7 +5,7 @@ local model = workspace:FindFirstChild("Model")
 local humanoid = model:FindFirstChild("Humanoid")
 
 task.wait(1) --! deprecated-global
-task.spawn(function() end) --! deprecated-global
+task.defer(function() end) --! deprecated-global
 task.delay(2, function() end) --! deprecated-global
 while task.wait() do --! deprecated-global
 	break
@@ -22,8 +22,8 @@ for _, item in pairs(part:GetChildren()) do --! deprecated-method
 end
 print(game:GetService("Lighting")) --! deprecated-method
 
-part:Destroy() --! deprecated-remove
-copy:Destroy() --! deprecated-remove
+part:Remove() --! deprecated-remove
+copy:remove() --! deprecated-remove
 
 local folder = Instance.new("Folder", workspace) --! instance-new-parent
 local value = Instance.new("IntValue", folder) --! instance-new-parent

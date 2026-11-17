@@ -1,5 +1,5 @@
 02-save-data.lua:69:7 bug bindtoclose-fixed-wait
-06-pet.lua:56:9 bug playeradded-no-existing-players
+06-pet.lua:56:9 advice playeradded-no-existing-players
 16-inventory-server.lua:39:7 bug bindtoclose-fixed-wait
 19-checkpoints.lua:97:7 bug bindtoclose-fixed-wait
 20-global-leaderboard.lua:112:7 bug bindtoclose-fixed-wait

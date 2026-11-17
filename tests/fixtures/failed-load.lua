@@ -43,6 +43,16 @@ local function loadD(player)
 	data[player] = saved
 end
 
+-- Bug: xpcall is no different from pcall here.
+local function loadE(player)
+	local ok, saved = xpcall(function()
+		return store:GetAsync("e" .. player.UserId) --! datastore-save-after-failed-load
+	end, warn)
+	if ok and saved then
+		data[player] = saved
+	end
+end
+
 local function save(player)
 	for _, prefix in { "a", "b", "c", "d", "e", "f" } do
 		pcall(function()

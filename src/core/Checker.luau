@@ -29,21 +29,27 @@ export type Finding = {
 	message: string,
 	fix: Fix?,
 }
+-- Another wording of a rule for a milder or a different case of the same problem.
+export type RuleVariant = { severity: string?, title: string?, message: string? }
 export type Rule = {
 	severity: string, -- "security" | "bug" | "deprecated" | "advice"
 	title: string,
 	message: string, -- string.format pattern
+	variants: { [string]: RuleVariant }?,
 }
 export type Options = {
 	-- "server" | "client" | "module"; nil when unknown (then guessed from the code)
 	scriptKind: string?,
+	-- method and field names that other scripts of the place define (Checker.definedMembers):
+	-- `e:destroy()` on such a name may be the author's own class, so it is not renamed
+	knownMembers: { [string]: boolean }?,
 }
 
 Checker.RULES = {
 	["remote-client-value"] = {
 		severity = "security",
 		title = "The client decides a game value",
-		message = "The server writes '%s', a value sent by the client, straight into game data. An exploiter can send any number. Compute the amount on the server instead.",
+		message = "The server writes '%s', a value sent by the client, into game data without an upper limit. An exploiter can send any number. Compute the amount on the server, look it up in a server table, or limit it with math.clamp.",
 	},
 	["remote-unvalidated-args"] = {
 		severity = "security",
@@ -54,6 +60,11 @@ Checker.RULES = {
 		severity = "bug",
 		title = "DataStore call without pcall",
 		message = "%s can fail (DataStore outage or limits) and will stop this script with an error. Wrap the call in pcall and handle the failure.",
+	},
+	["memorystore-no-pcall"] = {
+		severity = "bug",
+		title = "MemoryStore call without pcall",
+		message = "%s can fail (MemoryStore outage or limits) and will stop this script with an error. Wrap the call in pcall and handle the failure.",
 	},
 	["datastore-no-bindtoclose"] = {
 		severity = "bug",
@@ -78,7 +89,15 @@ Checker.RULES = {
 	["playeradded-no-existing-players"] = {
 		severity = "bug",
 		title = "Players already in the game are skipped",
-		message = "PlayerAdded is connected, but players who joined before this script started are skipped. Also loop over Players:GetPlayers() once.",
+		message = "PlayerAdded is connected %s, so players who joined before that are skipped. Also loop over Players:GetPlayers() once.",
+		variants = {
+			-- connected at the top of a script, before anything that can wait
+			early = {
+				severity = "advice",
+				title = "Players already in the game are not handled",
+				message = "PlayerAdded is connected without also handling players who are already in the game. It works while this script starts before anyone joins, but a wait added above it (WaitForChild, require, task.wait) or a later start skips players. Also loop over Players:GetPlayers() once.",
+			},
+		},
 	},
 	["require-by-id"] = {
 		severity = "security",
@@ -108,7 +127,7 @@ Checker.RULES = {
 	["deprecated-global"] = {
 		severity = "deprecated",
 		title = "Deprecated wait / spawn / delay",
-		message = "%s() is deprecated. Use %s() instead.",
+		message = "%s() is deprecated. Use %s() instead.%s",
 	},
 	["deprecated-connect"] = {
 		severity = "deprecated",
@@ -123,7 +142,12 @@ Checker.RULES = {
 	["deprecated-remove"] = {
 		severity = "deprecated",
 		title = "Deprecated :Remove()",
-		message = ":%s() is deprecated and does not free memory. Use :Destroy().",
+		message = ":%s() is deprecated. Use :Destroy() if the object is not used again. If it is put back later, set .Parent = nil instead: a destroyed object cannot be put back.",
+	},
+	["deprecated-joints"] = {
+		severity = "deprecated",
+		title = "Deprecated joint method",
+		message = ":%s() is deprecated and has no direct replacement. Join parts with WeldConstraint objects; to kill a character, set Humanoid.Health to 0.",
 	},
 	["instance-new-parent"] = {
 		severity = "advice",
@@ -147,7 +171,17 @@ Checker.RULES = {
 	},
 } :: { [string]: Rule }
 
-local DEPRECATED_GLOBALS = { wait = "task.wait", spawn = "task.spawn", delay = "task.delay" }
+-- old global -> replacement, and what to tell about the difference
+local DEPRECATED_GLOBALS: { [string]: { replacement: string, note: string } } = {
+	wait = { replacement = "task.wait", note = "" },
+	-- old spawn ran the function a moment later; task.spawn runs it right away, which changes
+	-- the order of the code around it. task.defer also runs it a moment later.
+	spawn = {
+		replacement = "task.defer",
+		note = " Like spawn, task.defer runs the function a moment later; task.spawn would run it right away.",
+	},
+	delay = { replacement = "task.delay", note = "" },
+}
 
 local SIGNAL_METHODS = { connect = "Connect", disconnect = "Disconnect" }
 
@@ -168,8 +202,6 @@ local METHOD_CASE = {
 	moveTo = "MoveTo",
 	takeDamage = "TakeDamage",
 	loadAnimation = "LoadAnimation",
-	breakJoints = "BreakJoints",
-	makeJoints = "MakeJoints",
 	getMass = "GetMass",
 }
 
@@ -202,10 +234,34 @@ local FIND_METHODS = {
 	FindFirstAncestorWhichIsA = true,
 }
 
+-- Joint methods: deprecated in every spelling, with no one-word replacement.
+local JOINT_METHODS = { makeJoints = true, breakJoints = true, MakeJoints = true, BreakJoints = true }
+
 local DATASTORE_GETTERS = { "GetDataStore", "GetOrderedDataStore", "GetGlobalDataStore" }
 
--- A function passed to a call whose name contains one of these counts as error-protected.
-local PROTECTING_CALLEES = { "pcall", "retry", "try", "promise", "safe", "attempt", "protect" }
+-- MemoryStoreService getters and the methods of what they return.
+local MEMORYSTORE_GETTERS = { GetSortedMap = true, GetQueue = true, GetHashMap = true }
+local MEMORYSTORE_METHODS = {
+	GetAsync = true,
+	SetAsync = true,
+	UpdateAsync = true,
+	RemoveAsync = true,
+	GetRangeAsync = true,
+	GetSizeAsync = true,
+	AddAsync = true,
+	ReadAsync = true,
+	ListItemsAsync = true,
+}
+
+-- A function passed to a call whose name has one of these words counts as error-protected:
+-- pcall, retryAsync, Promise.try, safeCall, withRetries. Whole words of the name, so that
+-- `telemetry` is not "try" and `runUnsafe` is not "safe".
+local PROTECTING_WORDS = { pcall = true, xpcall = true, try = true, safe = true, safely = true }
+local PROTECTING_PREFIXES = { "retr", "attempt", "protect", "promise" }
+
+-- Calls that may pause the script. One of them above `PlayerAdded:Connect` at the top of a
+-- script lets players join before the connection exists.
+local YIELDING_CALLS = { wait = true, WaitForChild = true, Wait = true, require = true }
 
 -- Tokens after which an `if` starts an if-expression, not an if-statement.
 local EXPRESSION_LEADERS = {}
@@ -269,6 +325,16 @@ local ENCODED_STRING_MIN_ESCAPES = 12
 local QUIET_CALLEES = { warn = true, print = true, tostring = true, error = true, assert = true, pcall = true }
 
 local COMPARISONS = { ["=="] = true, ["~="] = true, ["<"] = true, [">"] = true, ["<="] = true, [">="] = true }
+
+-- Symbols after which an expression goes on (`a +`, `a.`, `a ==`) and that continue one when
+-- they come next (`.b`, `+ b`, `(x)`); used to find where an `until` condition ends.
+local OPERATORS = {}
+for _, symbol in { "+", "-", "*", "/", "//", "%", "^", "..", "==", "~=", "<", ">", "<=", ">=", ".", ":", "#" } do
+	OPERATORS[symbol] = true
+end
+
+-- Of the validators, the ones that put an upper limit on a number.
+local BOUNDING_CALLS = { clamp = true, min = true }
 
 -- Calls that count as "the value was checked or cleaned up".
 local VALIDATORS = {
@@ -407,6 +473,12 @@ local function buildBlocks(tokens: { Lexer.Token }): ({ Block? }, { Block })
 						name = tokens[cursor].text
 					end
 					block.name = name
+				elseif previous and previous.kind == "symbol" and previous.text == "=" then
+					-- `local onGive = function(...)`, `Handlers.give = function(...)`
+					local target = tokens[index - 2]
+					if target and target.kind == "name" then
+						block.name = target.text
+					end
 				end
 				push(block)
 			elseif text == "end" then
@@ -427,14 +499,106 @@ local function buildBlocks(tokens: { Lexer.Token }): ({ Block? }, { Block })
 	return blockAt, allBlocks
 end
 
-local function lowerContains(text: string, needles: { string }): boolean
-	local lowered = string.lower(text)
-	for _, needle in needles do
-		if string.find(lowered, needle, 1, true) then
+-- The words of a name, lowercased: "retryAsync" -> retry, async; "HTTPService" -> http,
+-- service; "save_data2" -> save, data2.
+local function nameWords(name: string): { string }
+	local spaced = string.gsub(name, "(%l)(%u)", "%1_%2")
+	spaced = string.gsub(spaced, "(%u)(%u%l)", "%1_%2")
+	local words = {}
+	for word in string.gmatch(string.lower(spaced), "[^_]+") do
+		table.insert(words, word)
+	end
+	return words
+end
+
+local function hasWordStarting(name: string, prefix: string): boolean
+	for _, word in nameWords(name) do
+		if string.sub(word, 1, #prefix) == prefix then
 			return true
 		end
 	end
 	return false
+end
+
+local function isProtectingCallee(name: string): boolean
+	for _, word in nameWords(name) do
+		if PROTECTING_WORDS[word] then
+			return true
+		end
+		for _, prefix in PROTECTING_PREFIXES do
+			if string.sub(word, 1, #prefix) == prefix then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+-- Names of methods a script defines, the ones a `:name()` call could reach:
+-- `function Signal:connect(`, `function M.destroy(self`, `Enemy.takeDamage = function(self`,
+-- `{ destroy = function(self ... }`, and aliases (`Maid.destroy = Maid.clean`). A call with such
+-- a name may be the author's own class rather than a Roblox object.
+-- A module function (`function Clock.connect(phase, fn)`) or a field holding a value
+-- (`self.disconnect = signal:subscribe(fn)`) is called with a dot, so it does not count.
+local function membersDefinedIn(tokens: { Lexer.Token }): { [string]: boolean }
+	local members: { [string]: boolean } = {}
+	local function symbolAt(index: number, value: string): boolean
+		local token = tokens[index]
+		return token ~= nil and token.kind == "symbol" and token.text == value
+	end
+	local function keywordAt(index: number, value: string): boolean
+		local token = tokens[index]
+		return token ~= nil and token.kind == "keyword" and token.text == value
+	end
+	local function nameAt(index: number, value: string?): boolean
+		local token = tokens[index]
+		return token ~= nil and token.kind == "name" and (value == nil or token.text == value)
+	end
+	-- `(self` right after the given "(" position
+	local function selfFirst(open: number): boolean
+		return symbolAt(open, "(") and nameAt(open + 1, "self")
+	end
+	-- `A.b.c` starting at `start` and ending the statement (not called, not indexed further)
+	local function isNameChain(start: number): boolean
+		local cursor = start
+		if not nameAt(cursor) then
+			return false
+		end
+		while symbolAt(cursor + 1, ".") and nameAt(cursor + 2) do
+			cursor += 2
+		end
+		local after = tokens[cursor + 1]
+		if after == nil or after.kind == "keyword" or after.kind == "name" then
+			return true
+		end
+		return after.kind == "symbol" and (after.text == ";" or after.text == "," or after.text == "}")
+	end
+	local function isMethodDefinition(index: number): boolean
+		local afterDot = symbolAt(index - 1, ".")
+		local afterColon = symbolAt(index - 1, ":")
+		if (afterDot or afterColon) and symbolAt(index + 1, "(") then
+			-- `function a.b:c(`: walk back over the name chain to the `function` keyword
+			local cursor = index
+			while (symbolAt(cursor - 1, ".") or symbolAt(cursor - 1, ":")) and tokens[cursor - 2] do
+				cursor -= 2
+			end
+			return keywordAt(cursor - 1, "function") and (afterColon or selfFirst(index + 1))
+		end
+		local inTable = symbolAt(index - 1, "{") or symbolAt(index - 1, ",") or symbolAt(index - 1, ";")
+		if not ((afterDot or inTable) and symbolAt(index + 1, "=")) then
+			return false
+		end
+		if keywordAt(index + 2, "function") then
+			return selfFirst(index + 3)
+		end
+		return afterDot and isNameChain(index + 2)
+	end
+	for index, token in tokens do
+		if token.kind == "name" and isMethodDefinition(index) then
+			members[token.text] = true
+		end
+	end
+	return members
 end
 
 function Checker.check(source: string, options: Options?): { Finding }
@@ -473,22 +637,43 @@ function Checker.check(source: string, options: Options?): { Finding }
 		return token ~= nil and token.kind == "keyword" and token.text == value
 	end
 
-	local function add(rule: string, index: number, fix: Fix?, ...: any)
+	local function addVariant(rule: string, variantName: string?, index: number, fix: Fix?, ...: any)
 		local token = tokens[index]
 		local info = Checker.RULES[rule]
+		local variant: RuleVariant = if variantName and info.variants then info.variants[variantName] else {}
 		table.insert(findings, {
 			rule = rule,
-			severity = info.severity,
-			title = info.title,
+			severity = variant.severity or info.severity,
+			title = variant.title or info.title,
 			line = token.line,
 			col = token.col,
-			message = string.format(info.message, ...),
+			message = string.format(variant.message or info.message, ...),
 			fix = fix,
 		})
 	end
 
+	local function add(rule: string, index: number, fix: Fix?, ...: any)
+		addVariant(rule, nil, index, fix, ...)
+	end
+
 	local function replaceToken(index: number, newText: string): Fix
 		return { from = tokens[index].from, to = tokens[index].to, text = newText }
+	end
+
+	-- Index of the "(" matching the ")" at `close`.
+	local function matchingOpen(close: number): number
+		local depth = 0
+		for index = close, 1, -1 do
+			if isSymbol(index, ")") then
+				depth += 1
+			elseif isSymbol(index, "(") then
+				depth -= 1
+				if depth == 0 then
+					return index
+				end
+			end
+		end
+		return 1
 	end
 
 	-- Index of the ")" matching the "(" at `open`.
@@ -516,8 +701,14 @@ function Checker.check(source: string, options: Options?): { Finding }
 	local protectedNames: { [string]: boolean } = {}
 	local functionsByName: { [string]: Block } = {}
 	-- methods and fields this file defines itself (`function Signal:connect()`, `obj.destroy = function`):
-	-- a lowercase call with such a name is the author's own API, not a deprecated Roblox alias
-	local definedMembers: { [string]: boolean } = {}
+	-- a call with such a name is the author's own API, not a Roblox method
+	local definedMembers = membersDefinedIn(tokens)
+	-- the same names defined anywhere in the place (filled in by the plugin)
+	local knownMembers: { [string]: boolean } = (options and options.knownMembers) or {}
+	-- variables holding a MemoryStore map or queue (`local map = MemoryStoreService:GetSortedMap(...)`)
+	local memoryStores: { [string]: boolean } = {}
+	-- a `return` at the top level of the file: this is a ModuleScript
+	local isModule = scriptKind == "module"
 	-- tables written out in this file (`local PRICES = { ... }`): looking a client value up in
 	-- one of them is a whitelist check
 	local localTables: { [string]: boolean } = {}
@@ -525,12 +716,15 @@ function Checker.check(source: string, options: Options?): { Finding }
 	for index, token in tokens do
 		if token.kind == "name" then
 			names[token.text] = true
-			if
-				(isSymbol(index - 1, ".") or isSymbol(index - 1, ":"))
-				and isSymbol(index + 1, "=")
-				and isKeyword(index + 2, "function")
-			then
-				definedMembers[token.text] = true
+			if MEMORYSTORE_GETTERS[token.text] and isSymbol(index - 1, ":") then
+				-- `local map = MemoryStoreService:GetSortedMap(` / `self.queue = ...:GetQueue(`
+				local cursor = index - 1
+				while cursor > 1 and tokens[cursor].line == token.line and not isSymbol(cursor, "=") do
+					cursor -= 1
+				end
+				if isSymbol(cursor, "=") and isName(cursor - 1) then
+					memoryStores[text(cursor - 1)] = true
+				end
 			end
 			-- pcall(saveAll) / xpcall(saveAll, handler): the named function runs protected
 			if (token.text == "pcall" or token.text == "xpcall") and isSymbol(index + 1, "(") and isName(index + 2) then
@@ -538,6 +732,8 @@ function Checker.check(source: string, options: Options?): { Finding }
 					protectedNames[text(index + 2)] = true
 				end
 			end
+		elseif token.kind == "keyword" and token.text == "return" and blockAt[index] == nil then
+			isModule = true
 		elseif token.kind == "keyword" and token.text == "local" then
 			if isName(index + 1) and isSymbol(index + 2, "=") and isSymbol(index + 3, "{") then
 				localTables[text(index + 1)] = true
@@ -570,9 +766,6 @@ function Checker.check(source: string, options: Options?): { Finding }
 		if block.kind == "function" then
 			if block.name then
 				functionsByName[block.name] = block
-				if isSymbol(block.start + 2, ".") or isSymbol(block.start + 2, ":") then
-					definedMembers[block.name] = true
-				end
 			end
 			-- anonymous function passed to pcall(...) or a retry/promise helper
 			local before = block.start - 1
@@ -589,7 +782,7 @@ function Checker.check(source: string, options: Options?): { Finding }
 					end
 					cursor -= 1
 				end
-				if cursor >= 2 and isName(cursor - 1) and lowerContains(text(cursor - 1), PROTECTING_CALLEES) then
+				if cursor >= 2 and isName(cursor - 1) and isProtectingCallee(text(cursor - 1)) then
 					block.protected = true
 				end
 			end
@@ -670,6 +863,12 @@ function Checker.check(source: string, options: Options?): { Finding }
 			usesDataStore = true
 		end
 	end
+	local usesMemoryStore = false
+	for getter in MEMORYSTORE_GETTERS do
+		if names[getter] then
+			usesMemoryStore = true
+		end
+	end
 
 	local isClient = scriptKind == "client" or (scriptKind == nil and names.LocalPlayer == true)
 
@@ -690,13 +889,17 @@ function Checker.check(source: string, options: Options?): { Finding }
 		if not isSymbol(index + 1, "(") or isSymbol(index - 1, ".") or isSymbol(index - 1, ":") or localNames[name] then
 			return
 		end
-		if DEPRECATED_GLOBALS[name] and not isKeyword(index - 1, "function") then
+		-- `local wait = ...` anywhere in the file switches this off for the whole file: a
+		-- missed rename is cheaper than renaming a call to the author's own function
+		local deprecated = DEPRECATED_GLOBALS[name]
+		if deprecated and not isKeyword(index - 1, "function") then
 			add(
 				"deprecated-global",
 				index,
-				replaceToken(index, DEPRECATED_GLOBALS[name]),
+				replaceToken(index, deprecated.replacement),
 				name,
-				DEPRECATED_GLOBALS[name]
+				deprecated.replacement,
+				deprecated.note
 			)
 		end
 		if name == "loadstring" then
@@ -737,34 +940,69 @@ function Checker.check(source: string, options: Options?): { Finding }
 		add("findfirstchild-unchecked", index, nil, name)
 	end
 
-	-- obj:method(...) with a deprecated or risky Roblox method name
-	local function checkMethodCall(index: number, name: string)
+	-- obj:connect(...) / obj:destroy() / obj:Remove(): old spellings of Roblox methods. Not
+	-- reported when this file or another script of the place defines a method with that
+	-- name: then it may be the author's own class, and renaming it would break the game.
+	local function checkMethodAlias(index: number, name: string)
+		if definedMembers[name] or knownMembers[name] then
+			return
+		end
 		if SIGNAL_METHODS[name] then
 			add("deprecated-connect", index, replaceToken(index, SIGNAL_METHODS[name]), name, SIGNAL_METHODS[name])
 		elseif METHOD_CASE[name] then
 			add("deprecated-method", index, replaceToken(index, METHOD_CASE[name]), name, METHOD_CASE[name])
 		elseif (name == "Remove" or name == "remove") and isSymbol(index + 2, ")") then
-			add("deprecated-remove", index, replaceToken(index, "Destroy"), name)
-		elseif string.sub(name, 1, 13) == "FindPartOnRay" then
+			-- no fix: unlike Remove, Destroy locks the object, and code that puts it back later
+			-- (`tool.Parent = workspace`) would then fail
+			add("deprecated-remove", index, nil, name)
+		elseif JOINT_METHODS[name] then
+			add("deprecated-joints", index, nil, name)
+		end
+	end
+
+	-- store:GetAsync(...) and other DataStore / MemoryStore requests outside pcall
+	local function checkStorageCall(index: number, name: string)
+		local receiverIndex = index - 2
+		local receiver = text(receiverIndex)
+		local shown = receiver
+		-- `DataStoreService:GetDataStore("X"):GetAsync(k)`: the call that returned the store
+		if isSymbol(receiverIndex, ")") then
+			receiver = text(matchingOpen(receiverIndex) - 1)
+			shown = receiver .. "(…)"
+		end
+		if hasWordStarting(receiver, "http") then
+			return
+		end
+		if memoryStores[receiver] or MEMORYSTORE_GETTERS[receiver] then
+			if usesMemoryStore and MEMORYSTORE_METHODS[name] and not insideProtected(index) then
+				add("memorystore-no-pcall", index, nil, shown .. ":" .. name .. "()")
+			end
+			return
+		end
+		if not (usesDataStore and DATASTORE_METHODS[name]) then
+			return
+		end
+		if name == "SetAsync" or name == "UpdateAsync" then
+			savesData = true
+			table.insert(saveCalls, index)
+		elseif name == "GetAsync" then
+			table.insert(loadCalls, index)
+		end
+		if not insideProtected(index) then
+			add("datastore-no-pcall", index, nil, shown .. ":" .. name .. "()")
+		end
+	end
+
+	-- obj:method(...) with a deprecated or risky Roblox method name
+	local function checkMethodCall(index: number, name: string)
+		if string.sub(name, 1, 13) == "FindPartOnRay" then
 			add("deprecated-raycast", index, nil, name)
-		elseif name == "LoadAnimation" and isName(index - 2) and lowerContains(text(index - 2), { "hum" }) then
+		elseif name == "LoadAnimation" and isName(index - 2) and hasWordStarting(text(index - 2), "hum") then
 			add("deprecated-loadanimation", index)
 		elseif name == "LoadAsset" and names.InsertService then
 			add("insert-asset", index)
-		elseif DATASTORE_METHODS[name] and usesDataStore then
-			local receiver = text(index - 2)
-			if lowerContains(receiver, { "http" }) then
-				return
-			end
-			if name == "SetAsync" or name == "UpdateAsync" then
-				savesData = true
-				table.insert(saveCalls, index)
-			elseif name == "GetAsync" then
-				table.insert(loadCalls, index)
-			end
-			if not insideProtected(index) then
-				add("datastore-no-pcall", index, nil, receiver .. ":" .. name .. "()")
-			end
+		elseif DATASTORE_METHODS[name] or MEMORYSTORE_METHODS[name] then
+			checkStorageCall(index, name)
 		end
 	end
 
@@ -790,7 +1028,9 @@ function Checker.check(source: string, options: Options?): { Finding }
 		if not isSymbol(index + 1, ".") then
 			return
 		end
-		if isName(index + 2, "reverse") then
+		-- string.reverse on a variable is ordinary (putting commas into "1000000"); on a
+		-- string written in the code it only serves to hide that text
+		if isName(index + 2, "reverse") and kind(index + 4) == "string" and isSymbol(index + 5, ")") then
 			add("obfuscated-code", index, nil, "string.reverse")
 		elseif
 			isName(index + 2, "char")
@@ -889,6 +1129,33 @@ function Checker.check(source: string, options: Options?): { Finding }
 		end
 	end
 
+	-- Last token of the expression that starts at `start` (the condition after `until`).
+	local function expressionEnd(start: number, limit: number): number
+		local depth = 0
+		for index = start, limit do
+			local value, tokenKind = text(index), kind(index)
+			if tokenKind == "symbol" and (value == "(" or value == "[" or value == "{") then
+				depth += 1
+			elseif tokenKind == "symbol" and (value == ")" or value == "]" or value == "}") then
+				depth -= 1
+				if depth < 0 then
+					return index - 1
+				end
+			end
+			if depth == 0 then
+				local nextValue, nextKind = text(index + 1), kind(index + 1)
+				local wantsMore = (tokenKind == "symbol" and OPERATORS[value])
+					or (tokenKind == "keyword" and (value == "and" or value == "or" or value == "not"))
+				local goesOn = (nextKind == "symbol" and (OPERATORS[nextValue] or nextValue == "(" or nextValue == "["))
+					or (nextKind == "keyword" and (nextValue == "and" or nextValue == "or"))
+				if not wantsMore and not goesOn then
+					return index
+				end
+			end
+		end
+		return limit
+	end
+
 	-- RemoteEvent.OnServerEvent:Connect(function(player, ...)) / .OnServerInvoke = function
 	local function checkRemoteHandler(index: number, name: string)
 		local callback: Block? = nil
@@ -911,44 +1178,85 @@ function Checker.check(source: string, options: Options?): { Finding }
 			open += 1
 		end
 		local bodyStart = matchingParen(open) + 1
+
+		-- tokens of `if` / `elseif` / `while` / `until` conditions in the handler body
+		local inCondition: { [number]: boolean } = {}
+		local conditionOpen = false
+		for inner = bodyStart, finish - 1 do
+			if isKeyword(inner, "if") or isKeyword(inner, "elseif") or isKeyword(inner, "while") then
+				conditionOpen = true
+			elseif isKeyword(inner, "then") or isKeyword(inner, "do") then
+				conditionOpen = false
+			elseif isKeyword(inner, "until") then
+				for cursor = inner + 1, expressionEnd(inner + 1, finish - 1) do
+					inCondition[cursor] = true
+				end
+			end
+			if conditionOpen then
+				inCondition[inner] = true
+			end
+		end
+
+		-- `amount <= 100`, `amount < player.leaderstats.Coins.Value`: a limit. Comparing with
+		-- 0 or 1 only checks the sign (`amount > 0` still lets the client send 1e9).
+		local function comparisonLimits(inner: number, param: string): boolean
+			local operator: string?, other = nil, 0
+			if kind(inner + 1) == "symbol" and COMPARISONS[text(inner + 1)] then
+				operator, other = text(inner + 1), inner + 2
+				if isSymbol(other, "-") then
+					other += 1
+				end
+			elseif kind(inner - 1) == "symbol" and COMPARISONS[text(inner - 1)] then
+				operator, other = text(inner - 1), inner - 2
+			end
+			if not operator or operator == "~=" or isName(other, param) then
+				return false
+			end
+			if kind(other) == "number" then
+				local number = tonumber(text(other))
+				return number ~= 0 and number ~= 1
+			end
+			return not (isKeyword(other, "nil") or isKeyword(other, "true") or isKeyword(other, "false"))
+		end
+
 		-- the first parameter is the player, filled in by Roblox
 		for position = 2, #params do
 			local param = params[position]
-			local checked, valueWrite, sensitiveUse = false, nil, false
-			local inCondition = false
+			-- checked: any check at all (type, existence, range); limited: an upper limit on
+			-- the number, which is what matters before writing it into a stat
+			local checked, limited = false, false
+			local valueWrite: number?, sensitiveUse: number? = nil, nil
 			for inner = bodyStart, finish - 1 do
-				if
-					isKeyword(inner, "if")
-					or isKeyword(inner, "elseif")
-					or isKeyword(inner, "while")
-					or isKeyword(inner, "until")
-				then
-					inCondition = true
-				elseif isKeyword(inner, "then") or isKeyword(inner, "do") then
-					inCondition = false
-				end
 				if not isName(inner, param) or isSymbol(inner - 1, ".") or isSymbol(inner - 1, ":") then
 					continue
 				end
-				-- condition, comparison, table key or a validating call
 				local isCompared = COMPARISONS[text(inner - 1)] or COMPARISONS[text(inner + 1)]
 				local isTableKey = isSymbol(inner - 1, "[")
 					and isSymbol(inner + 1, "]")
 					and localTables[text(inner - 2)] == true
-				if inCondition or isCompared or isTableKey then
+				if inCondition[inner] or isCompared or isTableKey then
 					checked = true
-				else
-					local depth = 0
-					for back = inner - 1, math.max(bodyStart, inner - VALIDATOR_LOOKBACK), -1 do
-						if isSymbol(back, ")") then
-							depth += 1
-						elseif isSymbol(back, "(") then
-							if depth == 0 then
-								if isName(back - 1) and VALIDATORS[text(back - 1)] then
-									checked = true
+				end
+				if isTableKey or comparisonLimits(inner, param) then
+					limited = true
+				end
+				-- inside a validating call, however deep: `typeof(amount)`,
+				-- `math.clamp(tonumber(amount) or 0, 1, 10)`; every "(" with no ")" between it
+				-- and the value opens a call around the value
+				local depth = 0
+				for back = inner - 1, math.max(bodyStart, inner - VALIDATOR_LOOKBACK), -1 do
+					if isSymbol(back, ")") then
+						depth += 1
+					elseif isSymbol(back, "(") then
+						if depth == 0 then
+							local callee = text(back - 1)
+							if isName(back - 1) and VALIDATORS[callee] then
+								checked = true
+								if BOUNDING_CALLS[callee] then
+									limited = true
 								end
-								break
 							end
+						else
 							depth -= 1
 						end
 					end
@@ -956,7 +1264,7 @@ function Checker.check(source: string, options: Options?): { Finding }
 				-- used as an object (`target.Humanoid`, `target:Destroy()`) or on a line that
 				-- touches something sensitive
 				if isSymbol(inner + 1, ".") or isSymbol(inner + 1, ":") then
-					sensitiveUse = true
+					sensitiveUse = sensitiveUse or inner
 				else
 					local line = tokens[inner].line
 					local cursor = inner - 1
@@ -966,7 +1274,7 @@ function Checker.check(source: string, options: Options?): { Finding }
 					cursor += 1
 					while cursor < finish and tokens[cursor].line == line do
 						if isName(cursor) and SENSITIVE_SINKS[text(cursor)] then
-							sensitiveUse = true
+							sensitiveUse = sensitiveUse or inner
 						end
 						cursor += 1
 					end
@@ -984,19 +1292,27 @@ function Checker.check(source: string, options: Options?): { Finding }
 					end
 				end
 			end
-			if not checked then
-				if valueWrite then
-					add("remote-client-value", valueWrite, nil, param)
-				elseif sensitiveUse then
-					add("remote-unvalidated-args", index, nil, param)
-				end
+			-- reported where the client value is used, not at the :Connect line: the handler
+			-- may be a named function far above
+			if valueWrite and not limited then
+				add("remote-client-value", valueWrite, nil, param)
+			elseif sensitiveUse and not checked then
+				add("remote-unvalidated-args", sensitiveUse, nil, param)
 			end
 		end
 	end
 
-	-- "\104\116\116\112..." : a long run of numeric escapes
+	-- "\104\116\116\112..." : a long run of numeric escapes; ("eriuqer"):reverse()
 	local function checkEncodedString(index: number)
 		local value = text(index)
+		if
+			isSymbol(index - 1, "(")
+			and isSymbol(index + 1, ")")
+			and isSymbol(index + 2, ":")
+			and isName(index + 3, "reverse")
+		then
+			add("obfuscated-code", index, nil, "string.reverse")
+		end
 		if #value < ENCODED_STRING_MIN_LENGTH then
 			return
 		end
@@ -1014,8 +1330,11 @@ function Checker.check(source: string, options: Options?): { Finding }
 			local isPlain = not isSymbol(index - 1, ".") and not isSymbol(index - 1, ":")
 
 			checkGlobalCalls(index, name)
-			-- the file's own method with a Roblox-like name (`function Signal:connect()`) is
-			-- its own API: the method rules leave it alone, all other rules still run
+			if isMethodCall then
+				checkMethodAlias(index, name)
+			end
+			-- the file's own method with a Roblox name (`function Store:GetAsync()`) is its own
+			-- API: the method rules leave it alone, all other rules still run
 			if isMethodCall and not definedMembers[name] then
 				if FIND_METHODS[name] then
 					checkFindFirstChild(index, name)
@@ -1182,8 +1501,12 @@ function Checker.check(source: string, options: Options?): { Finding }
 	local function checkFailedLoads()
 		for _, loadIndex in loadCalls do
 			local wrapper = enclosingFunction(loadIndex)
-			-- only the plain `pcall(function() ... GetAsync ... end)` form
-			if not (wrapper and not wrapper.name and wrapper.finish and isName(wrapper.start - 2, "pcall")) then
+			-- only the plain `pcall(function() ... GetAsync ... end)` / `xpcall(function() ...` form
+			local wrapped = wrapper
+				and not wrapper.name
+				and wrapper.finish
+				and (isName(wrapper.start - 2, "pcall") or isName(wrapper.start - 2, "xpcall"))
+			if not wrapper or not wrapped then
 				continue
 			end
 			local loadFunction = outerFunction(loadIndex)
@@ -1222,8 +1545,37 @@ function Checker.check(source: string, options: Options?): { Finding }
 
 	checkFailedLoads()
 
+	-- Players who join before `PlayerAdded:Connect` runs are skipped. A Script normally starts
+	-- before anyone joins, so at its top level this is a precaution (advice), unless something
+	-- above the connection can pause the script. Inside a function or a ModuleScript the
+	-- connection runs whenever that code is called, possibly long after players joined.
+	local function playerAddedLateReason(connect: number): string?
+		if enclosingFunction(connect) then
+			return "inside a function, which may run after players have joined"
+		end
+		if isModule then
+			return "in a ModuleScript, which runs only when another script requires it"
+		end
+		for index = 1, connect - 1 do
+			if
+				isName(index)
+				and YIELDING_CALLS[text(index)]
+				and isSymbol(index + 1, "(")
+				and enclosingFunction(index) == nil
+			then
+				return `after code that can pause the script ({text(index)} on line {tokens[index].line})`
+			end
+		end
+		return nil
+	end
+
 	if playerAddedConnect and not handlesExistingPlayers and not isClient then
-		add("playeradded-no-existing-players", playerAddedConnect)
+		local reason = playerAddedLateReason(playerAddedConnect)
+		if reason then
+			add("playeradded-no-existing-players", playerAddedConnect, nil, reason)
+		else
+			addVariant("playeradded-no-existing-players", "early", playerAddedConnect, nil)
+		end
 	end
 
 	if savesData and playerRemoving and not names.BindToClose then
@@ -1241,6 +1593,13 @@ function Checker.check(source: string, options: Options?): { Finding }
 	end)
 
 	return findings
+end
+
+-- Method and field names a script defines (`function Enemy:takeDamage()`, `Signal.connect = ...`).
+-- The plugin gathers them from every script of the place and passes the union as
+-- `options.knownMembers`, so `e:takeDamage()` on a class from another ModuleScript is left alone.
+function Checker.definedMembers(source: string): { [string]: boolean }
+	return membersDefinedIn(Lexer.tokenize(source))
 end
 
 -- The fixes of the given findings in the order they must be applied: from the end of the

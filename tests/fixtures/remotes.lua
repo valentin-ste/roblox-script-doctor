@@ -13,10 +13,10 @@ give.OnServerEvent:Connect(function(player, amount)
 end)
 
 local function onHit(player, target, damage)
-	target.Humanoid:TakeDamage(damage)
+	target.Humanoid:TakeDamage(damage) --! remote-unvalidated-args, remote-unvalidated-args
 	print(player)
 end
-hit.OnServerEvent:Connect(onHit) --! remote-unvalidated-args, remote-unvalidated-args
+hit.OnServerEvent:Connect(onHit)
 
 -- Fine: no client arguments at all.
 buy.OnServerEvent:Connect(function(player)
@@ -55,6 +55,6 @@ toggle.OnServerEvent:Connect(function(player, visible, soundName)
 end)
 
 -- The client picks any object in ServerStorage: indexing a service is not a whitelist.
-give2.OnServerEvent:Connect(function(player, toolName) --! remote-unvalidated-args
-	game.ServerStorage[toolName]:Clone().Parent = player.Backpack
+give2.OnServerEvent:Connect(function(player, toolName)
+	game.ServerStorage[toolName]:Clone().Parent = player.Backpack --! remote-unvalidated-args
 end)
