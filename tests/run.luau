@@ -5,10 +5,15 @@
 		lune run tests/run.luau update     -- rewrite snapshots after a reviewed change
 
 	1. Fixtures (tests/fixtures/*.lua): every line marked `--! rule-id[, rule-id]` must
-	   produce exactly those findings; unmarked lines must produce none.
+	   produce exactly those findings (a rule listed twice means two findings on that line);
+	   unmarked lines must produce none. A line `--# scriptKind: client` anywhere in the file
+	   passes that option to the checker, the way the plugin does.
 	2. Fix fixtures (name.fixed.lua): applying all fixes to name.lua must give that text.
 	3. Sample sets (research/samples/<set>): findings are compared with a reviewed
 	   snapshot in tests/snapshots/<set>.txt, so any change in behaviour is visible.
+	4. Hand labels (research/labels.csv): for the AI sample sets, how many labelled problems
+	   are caught, missed, and how many findings have no label. Printed, not enforced: the
+	   snapshots already fail on any change, this tells whether the change is for the better.
 ]]
 local fs = require("@lune/fs")
 local process = require("@lune/process")
@@ -18,6 +23,11 @@ local Checker = require("../src/core/Checker")
 local update = process.args[1] == "update"
 local failures = 0
 local checks = 0
+
+-- A labelled line and a finding of the same rule in the same file count as one match when
+-- they are this many lines apart or closer: the label marks the line where a person sees the
+-- problem (the save that wipes data), the finding the line the rule anchors to (the load).
+local LABEL_LINE_TOLERANCE = 10
 
 local function fail(message: string)
 	failures += 1
@@ -43,6 +53,17 @@ local function sortedFiles(folder: string): { string }
 	return files
 end
 
+-- The kind of script a sample file is, from its name ("03-shop-client.lua"); the plugin
+-- knows it from the script class and location.
+local function kindFromName(name: string): string?
+	if string.find(name, "client", 1, true) then
+		return "client"
+	elseif string.find(name, "server", 1, true) then
+		return "server"
+	end
+	return nil
+end
+
 -- 1 and 2: fixtures -----------------------------------------------------------
 print("fixtures")
 for _, name in sortedFiles("tests/fixtures") do
@@ -50,30 +71,37 @@ for _, name in sortedFiles("tests/fixtures") do
 		continue
 	end
 	local source = fs.readFile("tests/fixtures/" .. name)
-	local expected: { [string]: boolean } = {}
+	local options: Checker.Options = {}
+	local expected: { [string]: number } = {}
 	for lineNumber, line in splitLines(source) do
 		local marker = string.match(line, "%-%-! (.+)$")
 		if marker then
 			for rule in string.gmatch(marker, "[%w%-]+") do
-				expected[lineNumber .. ":" .. rule] = true
+				local key = lineNumber .. ":" .. rule
+				expected[key] = (expected[key] or 0) + 1
 			end
 		end
+		local kind = string.match(line, "^%-%-# scriptKind: (%a+)")
+		if kind then
+			options.scriptKind = kind
+		end
 	end
-	local findings = Checker.check(source)
-	local got: { [string]: boolean } = {}
+	local findings = Checker.check(source, options)
+	local got: { [string]: number } = {}
 	for _, finding in findings do
-		got[finding.line .. ":" .. finding.rule] = true
+		local key = finding.line .. ":" .. finding.rule
+		got[key] = (got[key] or 0) + 1
 	end
 	checks += 1
 	local before = failures
-	for key in expected do
-		if not got[key] then
-			fail(name .. ": expected but missing " .. key)
+	for key, count in expected do
+		if (got[key] or 0) < count then
+			fail(`{name}: expected {count}, got {got[key] or 0}: {key}`)
 		end
 	end
-	for key in got do
-		if not expected[key] then
-			fail(name .. ": unexpected finding " .. key)
+	for key, count in got do
+		if count > (expected[key] or 0) then
+			fail(`{name}: unexpected finding ({count} found, {expected[key] or 0} expected): {key}`)
 		end
 	end
 
@@ -86,7 +114,7 @@ for _, name in sortedFiles("tests/fixtures") do
 			fs.writeFile(fixedPath .. ".actual", fixed)
 		end
 		-- fixed text must not trigger the fixable rules again
-		for _, finding in Checker.check(fixed) do
+		for _, finding in Checker.check(fixed, options) do
 			if finding.fix then
 				fail(name .. ": fixable finding remains after fixes: " .. finding.line .. ":" .. finding.rule)
 			end
@@ -130,18 +158,22 @@ do
 end
 
 -- 3: sample sets ---------------------------------------------------------------
-local function runSet(set: string, mustMatch: boolean)
+type Labelled = { file: string, line: number, rule: string }
+
+local function runSet(set: string, mustMatch: boolean): { Labelled }
 	local folder = "research/samples/" .. set
+	local found: { Labelled } = {}
 	if not fs.isDir(folder) then
 		print("samples: " .. set .. " — folder not found, skipped")
-		return
+		return found
 	end
 	local lines = {}
 	local perRule: { [string]: number } = {}
 	local total, fileCount, crashed = 0, 0, 0
 	for _, name in sortedFiles(folder) do
 		fileCount += 1
-		local ok, findings = pcall(Checker.check, fs.readFile(folder .. "/" .. name))
+		local ok, findings =
+			pcall(Checker.check, fs.readFile(folder .. "/" .. name), { scriptKind = kindFromName(name) })
 		if not ok then
 			crashed += 1
 			table.insert(lines, name .. ":0 CRASH " .. tostring(findings))
@@ -150,7 +182,11 @@ local function runSet(set: string, mustMatch: boolean)
 		for _, finding in findings do
 			total += 1
 			perRule[finding.rule] = (perRule[finding.rule] or 0) + 1
-			table.insert(lines, string.format("%s:%d:%d %s", name, finding.line, finding.col, finding.rule))
+			table.insert(
+				lines,
+				string.format("%s:%d:%d %s %s", name, finding.line, finding.col, finding.severity, finding.rule)
+			)
+			table.insert(found, { file = set .. "/" .. name, line = finding.line, rule = finding.rule })
 		end
 	end
 	local text = table.concat(lines, "\n") .. "\n"
@@ -161,7 +197,10 @@ local function runSet(set: string, mustMatch: boolean)
 		table.insert(rules, rule)
 	end
 	table.sort(rules, function(a, b)
-		return perRule[a] > perRule[b]
+		if perRule[a] ~= perRule[b] then
+			return perRule[a] > perRule[b]
+		end
+		return a < b
 	end)
 	for _, rule in rules do
 		print(string.format("  %5d  %s", perRule[rule], rule))
@@ -177,12 +216,127 @@ local function runSet(set: string, mustMatch: boolean)
 		fs.writeFile(snapshotPath .. ".actual", text)
 		fail(set .. ": findings differ from snapshot (see " .. snapshotPath .. ".actual)")
 	end
+	return found
 end
 
-runSet("sonnet", true)
-runSet("haiku", true)
-runSet("codex", true)
+-- 4: hand labels ------------------------------------------------------------------
+
+-- Fields of one CSV line ("a,b,\"c, with comma\",d").
+local function csvFields(line: string): { string }
+	local fields = {}
+	local position = 1
+	while position <= #line + 1 do
+		if string.sub(line, position, position) == '"' then
+			local value = ""
+			local cursor = position + 1
+			while cursor <= #line do
+				local char = string.sub(line, cursor, cursor)
+				if char == '"' and string.sub(line, cursor + 1, cursor + 1) == '"' then
+					value ..= '"'
+					cursor += 2
+				elseif char == '"' then
+					cursor += 1
+					break
+				else
+					value ..= char
+					cursor += 1
+				end
+			end
+			table.insert(fields, value)
+			position = cursor + 1
+		else
+			local comma = string.find(line, ",", position, true) or (#line + 1)
+			table.insert(fields, string.sub(line, position, comma - 1))
+			position = comma + 1
+		end
+	end
+	return fields
+end
+
+local function compareWithLabels(sets: { string }, foundBySet: { [string]: { Labelled } })
+	local labelPath = "research/labels.csv"
+	if not fs.isFile(labelPath) then
+		print("labels: " .. labelPath .. " not found, skipped")
+		return
+	end
+	local labels: { [string]: { Labelled } } = {}
+	local outOfScope: { [string]: number } = {}
+	for index, line in splitLines(fs.readFile(labelPath)) do
+		if index == 1 or line == "" then
+			continue
+		end
+		local fields = csvFields(line)
+		local file, lineNumber, category = fields[1], tonumber(fields[2]), fields[3]
+		local set = string.match(file, "^([^/]+)/")
+		if not set or category == "clean" then
+			continue
+		end
+		labels[set] = labels[set] or {}
+		if Checker.RULES[category] then
+			table.insert(labels[set], { file = file, line = lineNumber or 0, rule = category })
+		else
+			outOfScope[set] = (outOfScope[set] or 0) + 1
+		end
+	end
+
+	print("labels (research/labels.csv, problems a person marked in AI code)")
+	for _, set in sets do
+		local found = foundBySet[set] or {}
+		local used: { [number]: boolean } = {}
+		local caught, missed = 0, {}
+		for _, label in labels[set] or {} do
+			local best, bestDistance = nil, math.huge
+			for index, finding in found do
+				local distance = math.abs(finding.line - label.line)
+				if
+					not used[index]
+					and finding.file == label.file
+					and finding.rule == label.rule
+					and distance <= LABEL_LINE_TOLERANCE
+					and distance < bestDistance
+				then
+					best, bestDistance = index, distance
+				end
+			end
+			if best then
+				used[best] = true
+				caught += 1
+			else
+				table.insert(missed, `{label.file}:{label.line} {label.rule}`)
+			end
+		end
+		local unlabelled = {}
+		for index, finding in found do
+			if not used[index] then
+				table.insert(unlabelled, `{finding.file}:{finding.line} {finding.rule}`)
+			end
+		end
+		print(
+			string.format(
+				"  %-8s caught %d, missed %d, findings without a label %d; %d labelled problems are outside our rules",
+				set,
+				caught,
+				#missed,
+				#unlabelled,
+				outOfScope[set] or 0
+			)
+		)
+		for _, item in missed do
+			print("    missed     " .. item)
+		end
+		for _, item in unlabelled do
+			print("    no label   " .. item)
+		end
+	end
+end
+
+local foundBySet = {
+	sonnet = runSet("sonnet", true),
+	haiku = runSet("haiku", true),
+	codex = runSet("codex", true),
+}
 runSet("free-models", true)
+compareWithLabels({ "sonnet", "haiku", "codex" }, foundBySet)
 
 print(string.format("\n%d checks, %d failures", checks, failures))
 process.exit(if failures > 0 then 1 else 0)

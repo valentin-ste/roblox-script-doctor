@@ -16,7 +16,7 @@ local function onHit(player, target, damage)
 	target.Humanoid:TakeDamage(damage)
 	print(player)
 end
-hit.OnServerEvent:Connect(onHit) --! remote-unvalidated-args
+hit.OnServerEvent:Connect(onHit) --! remote-unvalidated-args, remote-unvalidated-args
 
 -- Fine: no client arguments at all.
 buy.OnServerEvent:Connect(function(player)
