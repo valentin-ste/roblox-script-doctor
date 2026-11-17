@@ -8,12 +8,14 @@
 local App = require(script.App)
 
 local PLUGIN_NAME = "Script Doctor"
+-- assets/icon-64.png, uploaded to Roblox 17.11.2026 (assets/icon.py draws it)
+local ICON = "rbxassetid://112052844064040"
 
 local toolbar = plugin:CreateToolbar(PLUGIN_NAME)
 local openButton = toolbar:CreateButton(
 	"ScriptDoctorOpen",
 	"Check every script for unsafe remotes, data-loss bugs and deprecated API",
-	"",
+	ICON,
 	PLUGIN_NAME
 )
 openButton.ClickableWhenViewportHidden = true
