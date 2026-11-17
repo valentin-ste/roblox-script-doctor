@@ -1,0 +1,3 @@
+# test data is kept exactly as written: line and column numbers are part of the expectations
+tests/fixtures/
+tests/samples/

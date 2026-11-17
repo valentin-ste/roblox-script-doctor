@@ -100,7 +100,7 @@ The checker core (`src/core`) is plain Luau with no Roblox API, tested with
 ```sh
 lune run tests/run.luau            # fixtures, fix/undo, sample snapshots, hand labels
 lune run tests/run.luau update     # rewrite snapshots after reviewing the difference
-stylua src tests
+stylua src tests                   # test data is excluded by .styluaignore
 selene src/core tests/run.luau
 selene generate-roblox-std         # once: writes roblox.yml for the next line
 selene --config selene-plugin.toml src/plugin tests/studio
