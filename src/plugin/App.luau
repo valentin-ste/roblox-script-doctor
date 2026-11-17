@@ -721,6 +721,19 @@ function App.mount(host: Instance, options: Options?): Controller
 		end
 	end
 
+	-- While "Fix N safe" waits for the second click it takes the colour of the question above it.
+	local function paintConfirm(confirming: boolean)
+		if confirming then
+			fixAllButton.BackgroundColor3 = WARNING
+			fixAllButton.TextColor3 = WHITE
+			fixAllStroke.Color = WARNING
+		else
+			fixAllButton.BackgroundColor3 = themeColor(Enum.StudioStyleGuideColor.Button, Color3.fromRGB(240, 240, 240))
+			fixAllButton.TextColor3 = themeColor(Enum.StudioStyleGuideColor.ButtonText, Color3.fromRGB(30, 30, 30))
+			fixAllStroke.Color = themeColor(Enum.StudioStyleGuideColor.Border, Color3.fromRGB(180, 180, 180))
+		end
+	end
+
 	-- Buttons look pressed-out while an action runs; clicks are ignored then anyway.
 	local function setEnabled(button: TextButton, enabled: boolean)
 		button.AutoButtonColor = enabled
@@ -956,6 +969,7 @@ function App.mount(host: Instance, options: Options?): Controller
 		end
 
 		fixAllButton.Text = if confirming then `Yes, fix {fixable}` else `Fix {fixable} safe`
+		paintConfirm(confirming)
 		fixAllButton.Visible = fixable > 0 and editable
 		undoButton.Visible = #undoSteps > 0 and editable
 		for _, button in { scanButton, fixAllButton, undoButton } do
