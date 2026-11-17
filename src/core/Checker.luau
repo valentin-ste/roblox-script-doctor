@@ -50,6 +50,12 @@ Checker.RULES = {
 		severity = "security",
 		title = "The client decides a game value",
 		message = "The server writes '%s', a value sent by the client, into game data without an upper limit. An exploiter can send any number. Compute the amount on the server, look it up in a server table, or limit it with math.clamp.",
+		variants = {
+			-- `coins.Value -= amount`: a negative number adds instead
+			subtract = {
+				message = "The server subtracts '%s', a value sent by the client, from game data without checking that it is above zero. An exploiter can send a negative number and gain instead of pay. Check that it is greater than 0 (and not more than the player has).",
+			},
+		},
 	},
 	["remote-unvalidated-args"] = {
 		severity = "security",
@@ -261,6 +267,7 @@ local PROTECTING_PREFIXES = { "retr", "attempt", "protect", "promise" }
 
 -- Calls that may pause the script. One of them above `PlayerAdded:Connect` at the top of a
 -- script lets players join before the connection exists.
+-- Every `:SomethingAsync()` method pauses too (GetAsync, LoadCharacterAsync, ...).
 local YIELDING_CALLS = { wait = true, WaitForChild = true, Wait = true, require = true }
 
 -- Tokens after which an `if` starts an if-expression, not an if-statement.
@@ -333,8 +340,13 @@ for _, symbol in { "+", "-", "*", "/", "//", "%", "^", "..", "==", "~=", "<", ">
 	OPERATORS[symbol] = true
 end
 
--- Of the validators, the ones that put an upper limit on a number.
-local BOUNDING_CALLS = { clamp = true, min = true }
+-- Of the validators, the ones that limit a number, and from which side.
+local BOUNDING_CALLS: { [string]: string } = { clamp = "both", min = "upper", max = "lower", abs = "lower" }
+
+-- Added to a deprecated-name finding when another script of the place defines a method with
+-- that name: the call may be the author's own class, so there is no button.
+local OWN_NAME_NOTE =
+	" A script in this place defines its own :%s(), so this call may be to it: there is no automatic fix. Change it by hand if this is a Roblox object."
 
 -- Calls that count as "the value was checked or cleaned up".
 local VALIDATORS = {
@@ -698,7 +710,6 @@ function Checker.check(source: string, options: Options?): { Finding }
 
 	local names: { [string]: boolean } = {}
 	local localNames: { [string]: boolean } = {}
-	local protectedNames: { [string]: boolean } = {}
 	local functionsByName: { [string]: Block } = {}
 	-- methods and fields this file defines itself (`function Signal:connect()`, `obj.destroy = function`):
 	-- a call with such a name is the author's own API, not a Roblox method
@@ -724,12 +735,6 @@ function Checker.check(source: string, options: Options?): { Finding }
 				end
 				if isSymbol(cursor, "=") and isName(cursor - 1) then
 					memoryStores[text(cursor - 1)] = true
-				end
-			end
-			-- pcall(saveAll) / xpcall(saveAll, handler): the named function runs protected
-			if (token.text == "pcall" or token.text == "xpcall") and isSymbol(index + 1, "(") and isName(index + 2) then
-				if isSymbol(index + 3, ")") or isSymbol(index + 3, ",") then
-					protectedNames[text(index + 2)] = true
 				end
 			end
 		elseif token.kind == "keyword" and token.text == "return" and blockAt[index] == nil then
@@ -788,12 +793,6 @@ function Checker.check(source: string, options: Options?): { Finding }
 			end
 		end
 	end
-	for name in protectedNames do
-		if functionsByName[name] then
-			functionsByName[name].protected = true
-		end
-	end
-
 	local function insideKind(index: number, wanted: (Block) -> boolean): boolean
 		local block = blockAt[index]
 		while block do
@@ -809,6 +808,55 @@ function Checker.check(source: string, options: Options?): { Finding }
 		return insideKind(index, function(block)
 			return block.protected == true
 		end)
+	end
+
+	-- A named function runs protected when every use of it is protected: handed to pcall
+	-- (`pcall(load, player)`) or called inside protected code. One plain call (`refresh()`
+	-- in a loop) is enough for a failure to stop the script, so then it is not protected.
+	do
+		local uses: { [string]: { number } } = {}
+		for index, token in tokens do
+			local block = if token.kind == "name" then functionsByName[token.text] else nil
+			if not block or isSymbol(index - 1, ".") or isSymbol(index - 1, ":") then
+				continue
+			end
+			local isDefinition = isKeyword(index - 1, "function")
+				or (isSymbol(index + 1, "=") and isKeyword(index + 2, "function"))
+			local insideItself = index > block.start and index < (block.finish or count)
+			if not isDefinition and not insideItself then
+				uses[token.text] = uses[token.text] or {}
+				table.insert(uses[token.text], index)
+			end
+		end
+		local function protectedUse(index: number): boolean
+			local handedToProtector = isSymbol(index - 1, "(")
+				and isName(index - 2)
+				and isProtectingCallee(text(index - 2))
+				and (isSymbol(index + 1, ")") or isSymbol(index + 1, ","))
+			return handedToProtector or insideProtected(index)
+		end
+		-- repeat: a function called only from a function that just became protected
+		local changed = true
+		while changed do
+			changed = false
+			for name, block in functionsByName do
+				local list = uses[name]
+				if block.protected or not list then
+					continue
+				end
+				local all = true
+				for _, index in list do
+					if not protectedUse(index) then
+						all = false
+						break
+					end
+				end
+				if all then
+					block.protected = true
+					changed = true
+				end
+			end
+		end
 	end
 
 	local function enclosingFunction(index: number): Block?
@@ -851,8 +899,20 @@ function Checker.check(source: string, options: Options?): { Finding }
 					return block
 				end
 			end
-		elseif isName(index) and (isSymbol(index + 1, ")") or isSymbol(index + 1, ",")) then
-			return functionsByName[text(index)]
+		elseif isName(index) then
+			-- `onGive` or `Handlers.give`, as an argument or at the end of a statement
+			local last = index
+			while isSymbol(last + 1, ".") and isName(last + 2) do
+				last += 2
+			end
+			local after = tokens[last + 1]
+			local endsHere = after == nil
+				or after.kind == "keyword"
+				or after.kind == "name"
+				or (after.kind == "symbol" and (after.text == ")" or after.text == "," or after.text == ";"))
+			if endsHere then
+				return functionsByName[text(last)]
+			end
 		end
 		return nil
 	end
@@ -940,23 +1000,33 @@ function Checker.check(source: string, options: Options?): { Finding }
 		add("findfirstchild-unchecked", index, nil, name)
 	end
 
-	-- obj:connect(...) / obj:destroy() / obj:Remove(): old spellings of Roblox methods. Not
-	-- reported when this file or another script of the place defines a method with that
-	-- name: then it may be the author's own class, and renaming it would break the game.
+	-- obj:connect(...) / obj:destroy() / obj:Remove(): old spellings of Roblox methods.
+	-- When this file defines a method with that name, the call is its own API: not reported.
+	-- When another script of the place does, the call may be that class or a Roblox object:
+	-- reported, but without a button, since renaming the author's method breaks the game.
 	local function checkMethodAlias(index: number, name: string)
-		if definedMembers[name] or knownMembers[name] then
+		if definedMembers[name] then
 			return
 		end
+		local elsewhere = knownMembers[name] == true
+		local function rename(newText: string): Fix?
+			return if elsewhere then nil else replaceToken(index, newText)
+		end
+		local before = #findings
 		if SIGNAL_METHODS[name] then
-			add("deprecated-connect", index, replaceToken(index, SIGNAL_METHODS[name]), name, SIGNAL_METHODS[name])
+			add("deprecated-connect", index, rename(SIGNAL_METHODS[name]), name, SIGNAL_METHODS[name])
 		elseif METHOD_CASE[name] then
-			add("deprecated-method", index, replaceToken(index, METHOD_CASE[name]), name, METHOD_CASE[name])
+			add("deprecated-method", index, rename(METHOD_CASE[name]), name, METHOD_CASE[name])
 		elseif (name == "Remove" or name == "remove") and isSymbol(index + 2, ")") then
 			-- no fix: unlike Remove, Destroy locks the object, and code that puts it back later
 			-- (`tool.Parent = workspace`) would then fail
 			add("deprecated-remove", index, nil, name)
 		elseif JOINT_METHODS[name] then
 			add("deprecated-joints", index, nil, name)
+		end
+		if elsewhere and #findings > before then
+			local finding = findings[#findings]
+			finding.message ..= string.format(OWN_NAME_NOTE, name)
 		end
 	end
 
@@ -1163,9 +1233,6 @@ function Checker.check(source: string, options: Options?): { Finding }
 			callback = callbackAt(index + 4)
 		elseif name == "OnServerInvoke" and isSymbol(index + 1, "=") then
 			callback = callbackAt(index + 2)
-			if not callback and isName(index + 2) then
-				callback = functionsByName[text(index + 2)]
-			end
 		end
 		if not (callback and callback.finish) then
 			return
@@ -1179,14 +1246,24 @@ function Checker.check(source: string, options: Options?): { Finding }
 		end
 		local bodyStart = matchingParen(open) + 1
 
-		-- tokens of `if` / `elseif` / `while` / `until` conditions in the handler body
+		-- tokens of `if` / `elseif` / `while` / `until` conditions in the handler body, and for
+		-- `if` / `elseif` conditions the `then` that ends them
 		local inCondition: { [number]: boolean } = {}
+		local conditionThen: { [number]: number } = {}
 		local conditionOpen = false
+		local pending: { number } = {}
 		for inner = bodyStart, finish - 1 do
 			if isKeyword(inner, "if") or isKeyword(inner, "elseif") or isKeyword(inner, "while") then
 				conditionOpen = true
+				pending = {}
 			elseif isKeyword(inner, "then") or isKeyword(inner, "do") then
+				if isKeyword(inner, "then") then
+					for _, cursor in pending do
+						conditionThen[cursor] = inner
+					end
+				end
 				conditionOpen = false
+				pending = {}
 			elseif isKeyword(inner, "until") then
 				for cursor = inner + 1, expressionEnd(inner + 1, finish - 1) do
 					inCondition[cursor] = true
@@ -1194,37 +1271,75 @@ function Checker.check(source: string, options: Options?): { Finding }
 			end
 			if conditionOpen then
 				inCondition[inner] = true
+				table.insert(pending, inner)
 			end
 		end
 
-		-- `amount <= 100`, `amount < player.leaderstats.Coins.Value`: a limit. Comparing with
-		-- 0 or 1 only checks the sign (`amount > 0` still lets the client send 1e9).
-		local function comparisonLimits(inner: number, param: string): boolean
-			local operator: string?, other = nil, 0
-			if kind(inner + 1) == "symbol" and COMPARISONS[text(inner + 1)] then
-				operator, other = text(inner + 1), inner + 2
-				if isSymbol(other, "-") then
-					other += 1
-				end
-			elseif kind(inner - 1) == "symbol" and COMPARISONS[text(inner - 1)] then
-				operator, other = text(inner - 1), inner - 2
-			end
-			if not operator or operator == "~=" or isName(other, param) then
+		-- `if <condition> then return end`: the code below runs when the condition is false
+		local function branchRejects(thenIndex: number): boolean
+			local block = blockAt[thenIndex]
+			if not block or block.kind ~= "if" or not block.finish then
 				return false
 			end
-			if kind(other) == "number" then
-				local number = tonumber(text(other))
-				return number ~= 0 and number ~= 1
+			for cursor = thenIndex + 1, (block.finish :: number) - 1 do
+				if blockAt[cursor] == block then
+					if isKeyword(cursor, "else") or isKeyword(cursor, "elseif") then
+						return false
+					elseif
+						isKeyword(cursor, "return")
+						or (isName(cursor, "error") and isSymbol(cursor + 1, "("))
+						or isName(cursor, "Kick")
+					then
+						return true
+					end
+				end
 			end
-			return not (isKeyword(other, "nil") or isKeyword(other, "true") or isKeyword(other, "false"))
+			return false
+		end
+
+		-- Which limit a comparison puts on the value where the code goes on: "upper"
+		-- (`amount <= MAX`, `if amount > MAX then return end`), "lower" (`amount > 0`), "both"
+		-- (`amount == 5`) or nil.
+		local function comparisonBound(inner: number, param: string): string?
+			local operator: string?, other, paramLeft = nil, 0, true
+			if kind(inner + 1) == "symbol" and COMPARISONS[text(inner + 1)] then
+				operator, other, paramLeft = text(inner + 1), inner + 2, true
+			elseif kind(inner - 1) == "symbol" and COMPARISONS[text(inner - 1)] then
+				operator, other, paramLeft = text(inner - 1), inner - 2, false
+			end
+			if not operator or operator == "~=" or isName(other, param) then
+				return nil
+			end
+			if isKeyword(other, "nil") or isKeyword(other, "true") or isKeyword(other, "false") then
+				return nil
+			end
+			if operator == "==" then
+				return "both"
+			end
+			local less = operator == "<" or operator == "<="
+			-- "the value is at most X": amount < X, amount <= X, X > amount, X >= amount
+			local statesUpper = if paramLeft then less else not less
+			local thenIndex = conditionThen[inner]
+			if thenIndex and branchRejects(thenIndex) then
+				statesUpper = not statesUpper
+			end
+			if statesUpper then
+				return "upper"
+			end
+			-- `amount > -5` does not make it positive
+			local negative = if paramLeft then isSymbol(other, "-") else isSymbol(other - 1, "-")
+			return if negative then nil else "lower"
 		end
 
 		-- the first parameter is the player, filled in by Roblox
 		for position = 2, #params do
 			local param = params[position]
-			-- checked: any check at all (type, existence, range); limited: an upper limit on
-			-- the number, which is what matters before writing it into a stat
-			local checked, limited = false, false
+			-- checked: any check at all (type, existence, range). Before the number goes into a
+			-- stat it needs a limit from the side that matters: an upper one when it is added or
+			-- set (or the client sends 1e9), a lower one when it is subtracted (or the client
+			-- sends a negative number and gains).
+			local checked, upper, lower = false, false, false
+			local needUpper, needLower = false, false
 			local valueWrite: number?, sensitiveUse: number? = nil, nil
 			for inner = bodyStart, finish - 1 do
 				if not isName(inner, param) or isSymbol(inner - 1, ".") or isSymbol(inner - 1, ":") then
@@ -1237,9 +1352,9 @@ function Checker.check(source: string, options: Options?): { Finding }
 				if inCondition[inner] or isCompared or isTableKey then
 					checked = true
 				end
-				if isTableKey or comparisonLimits(inner, param) then
-					limited = true
-				end
+				local bound = if isTableKey then "both" else comparisonBound(inner, param)
+				upper = upper or bound == "upper" or bound == "both"
+				lower = lower or bound == "lower" or bound == "both"
 				-- inside a validating call, however deep: `typeof(amount)`,
 				-- `math.clamp(tonumber(amount) or 0, 1, 10)`; every "(" with no ")" between it
 				-- and the value opens a call around the value
@@ -1252,9 +1367,9 @@ function Checker.check(source: string, options: Options?): { Finding }
 							local callee = text(back - 1)
 							if isName(back - 1) and VALIDATORS[callee] then
 								checked = true
-								if BOUNDING_CALLS[callee] then
-									limited = true
-								end
+								local callBound = BOUNDING_CALLS[callee]
+								upper = upper or callBound == "upper" or callBound == "both"
+								lower = lower or callBound == "lower" or callBound == "both"
 							end
 						else
 							depth -= 1
@@ -1289,13 +1404,21 @@ function Checker.check(source: string, options: Options?): { Finding }
 						and isName(back - 1, "Value")
 					then
 						valueWrite = valueWrite or inner
+						-- `Value -= amount`, `Value = Value - amount`
+						if isSymbol(back, "-=") or isSymbol(inner - 1, "-") then
+							needLower = true
+						else
+							needUpper = true
+						end
 					end
 				end
 			end
 			-- reported where the client value is used, not at the :Connect line: the handler
 			-- may be a named function far above
-			if valueWrite and not limited then
+			if valueWrite and needUpper and not upper then
 				add("remote-client-value", valueWrite, nil, param)
+			elseif valueWrite and needLower and not lower then
+				addVariant("remote-client-value", "subtract", valueWrite, nil, param)
 			elseif sensitiveUse and not checked then
 				add("remote-unvalidated-args", sensitiveUse, nil, param)
 			end
@@ -1556,14 +1679,24 @@ function Checker.check(source: string, options: Options?): { Finding }
 		if isModule then
 			return "in a ModuleScript, which runs only when another script requires it"
 		end
+		-- code that runs as the script starts: the top level, and functions handed to pcall
+		-- there (pcall runs them at once)
+		local function runsAtStart(index: number): boolean
+			local block = enclosingFunction(index)
+			while block do
+				local callee = text(block.start - 2)
+				if not (isSymbol(block.start - 1, "(") and (callee == "pcall" or callee == "xpcall")) then
+					return false
+				end
+				block = enclosingFunction(block.start - 1)
+			end
+			return true
+		end
 		for index = 1, connect - 1 do
-			if
-				isName(index)
-				and YIELDING_CALLS[text(index)]
-				and isSymbol(index + 1, "(")
-				and enclosingFunction(index) == nil
-			then
-				return `after code that can pause the script ({text(index)} on line {tokens[index].line})`
+			local name = text(index)
+			local yields = YIELDING_CALLS[name] or (isSymbol(index - 1, ":") and string.sub(name, -5) == "Async")
+			if isName(index) and yields and isSymbol(index + 1, "(") and runsAtStart(index) then
+				return `after code that can pause the script ({name} on line {tokens[index].line})`
 			end
 		end
 		return nil

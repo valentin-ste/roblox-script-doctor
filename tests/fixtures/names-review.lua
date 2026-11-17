@@ -50,3 +50,18 @@ print(("gnirtsdaol"):reverse()) --! obfuscated-code
 -- Joint methods are deprecated in every spelling.
 workspace.Model:MakeJoints() --! deprecated-joints
 workspace.Model:breakJoints() --! deprecated-joints
+
+-- Handed to pcall once but also called plainly: a failure still stops the script.
+local refresh = function()
+	return store:GetAsync("top") --! datastore-no-pcall
+end
+pcall(refresh)
+refresh()
+
+-- Called only inside protected code: protected.
+local function loadProfile(key)
+	return store:GetAsync(key)
+end
+pcall(function()
+	loadProfile("h")
+end)

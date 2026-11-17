@@ -166,21 +166,22 @@ do
 	)
 end
 
--- 2c: members defined in other scripts of the place switch the alias rules off ----------
+-- 2c: methods defined in other scripts of the place take the button away -------------
 do
 	checks += 1
 	local classModule =
 		"local Enemy = {}\nfunction Enemy:takeDamage(n) end\nEnemy.destroy = function(self) end\nreturn Enemy\n"
 	local user = "local e = require(script.Parent.Enemy).new()\ne:takeDamage(10)\ne:destroy()\npart:clone()\n"
 	local members = Checker.definedMembers(classModule)
-	local findings = Checker.check(user, { knownMembers = members })
-	local rules = {}
-	for _, finding in findings do
-		table.insert(rules, finding.line .. ":" .. finding.rule)
+	local items = {}
+	for _, finding in Checker.check(user, { knownMembers = members }) do
+		table.insert(items, `{finding.line}:{finding.rule}:{if finding.fix then "fix" else "nofix"}`)
 	end
-	local text = table.concat(rules, " ")
-	if text ~= "4:deprecated-method" then
-		fail("knownMembers: expected only the part:clone() finding, got: " .. text)
+	-- the finding stays (it may be a Roblox object), only the rename button goes
+	local expected = "2:deprecated-method:nofix 3:deprecated-method:nofix 4:deprecated-method:fix"
+	local got = table.concat(items, " ")
+	if got ~= expected then
+		fail("knownMembers: expected " .. expected .. ", got " .. got)
 	else
 		print("knownMembers: ok")
 	end

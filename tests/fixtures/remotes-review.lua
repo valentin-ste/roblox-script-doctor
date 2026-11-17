@@ -52,3 +52,40 @@ ReplicatedStorage.Wait.OnServerEvent:Connect(function(player, target)
 	target:Destroy()
 	print(player)
 end)
+
+-- A lower limit only, in either form: the client can still send 1e9.
+ReplicatedStorage.Give6.OnServerEvent:Connect(function(player, amount)
+	if amount >= 5 then
+		player.leaderstats.Coins.Value += amount --! remote-client-value
+	end
+end)
+ReplicatedStorage.Give7.OnServerEvent:Connect(function(player, amount)
+	if amount < 5 then
+		return
+	end
+	player.leaderstats.Coins.Value += amount --! remote-client-value
+end)
+
+-- Spending: a limit by the balance is not enough, a negative number adds coins.
+ReplicatedStorage.Spend.OnServerEvent:Connect(function(player, amount)
+	local coins = player.leaderstats.Coins
+	if amount <= coins.Value then
+		coins.Value -= amount --! remote-client-value
+	end
+end)
+
+-- Fine: spending checked from both sides.
+ReplicatedStorage.Spend2.OnServerEvent:Connect(function(player, amount)
+	local coins = player.leaderstats.Coins
+	if typeof(amount) ~= "number" or amount <= 0 or amount > coins.Value then
+		return
+	end
+	coins.Value -= amount
+end)
+
+-- A handler kept in a table and connected through it.
+local Handlers = {}
+Handlers.give = function(player, amount)
+	player.leaderstats.Coins.Value += amount --! remote-client-value
+end
+ReplicatedStorage.Give8.OnServerEvent:Connect(Handlers.give)
