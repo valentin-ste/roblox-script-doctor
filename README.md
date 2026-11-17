@@ -13,7 +13,7 @@ scripts, and code written by AI assistants.
 
 | Rule | What it finds |
 |---|---|
-| `remote-client-value` | A number sent by the client is written into a `.Value` (coins, stats) without an upper limit |
+| `remote-client-value` | A number sent by the client goes into a `.Value` (coins, stats) unlimited: added or set without an upper limit, or subtracted without checking it is above zero (a negative number would add) |
 | `remote-unvalidated-args` | A value sent by the client is used on health, position, cloning, saving… without any check |
 | `require-by-id` | `require(123456)`: code downloaded from an asset you cannot see |
 | `loadstring` | Text run as code |
@@ -54,11 +54,13 @@ the code around it.
 ## What the Fix buttons change
 
 - **Fix** on a finding replaces the one word it points at.
-- **Fix N safe** asks first, then applies every fix in the place. Only the renames in the
-  table above are applied; everything else needs a person.
-- A lowercase method is **not** renamed when any script of the place defines a method with
-  that name (`function Enemy:takeDamage()`, `Maid.destroy = Maid.clean`): then the call may
-  be your own class, and `e:TakeDamage()` would break it.
+- **Fix N safe** asks first; a second click (not a quick double click) applies every fix in
+  the place. Only the renames in the table above are applied; everything else needs a person.
+- A lowercase method is **not** renamed when a script of the place defines a method with that
+  name (`function Enemy:takeDamage()`, `Maid.destroy = Maid.clean`): the call may be your own
+  class, and `e:TakeDamage()` would break it. The finding stays, without the button, with a
+  note; check by hand whether it is a Roblox object. In the script that defines the method
+  itself, such calls are its own API and are not reported.
 - **Ctrl+Z does not undo plugin edits.** Use **Undo fixes** in the panel: each press takes
   back one fix step (up to 20). A script you edited after the fix is left alone. The undo
   history is kept until Studio is closed.
@@ -97,5 +99,5 @@ selene --config selene-plugin.toml src/plugin tests/studio
 ```
 
 The plugin shell (`src/plugin`) is tested in Studio: build with
-`rojo build test.project.json -o build/ScriptDoctor.rbxm` (adds the automation hook in
-`tests/studio/TestHooks.luau`) and run `tests/studio/e2e.luau`; see the comment at its top.
+`rojo build test.project.json -o build/ScriptDoctor-test.rbxm` (adds the automation hook in
+`tests/studio/TestHooks.luau`; its panel is titled “Script Doctor (test build)”) and run `tests/studio/e2e.luau`; see the comment at its top.
