@@ -973,6 +973,12 @@ function Checker.check(source: string, options: Options?): { Finding }
 
 	-- part:FindFirstChild("X"):Destroy() / part:FindFirstChild("X").Value
 	local function checkFindFirstChild(index: number, name: string)
+		-- `script:FindFirstChild("Config")`: the script's own children come with it; and inside
+		-- pcall a missing object stops nothing
+		local ownChild = isName(index - 2, "script") and not isSymbol(index - 3, ".")
+		if ownChild or insideProtected(index) then
+			return
+		end
 		local close = matchingParen(index + 1)
 		if not ((isSymbol(close + 1, ".") or isSymbol(close + 1, ":")) and isName(close + 2)) then
 			return
@@ -1695,6 +1701,10 @@ function Checker.check(source: string, options: Options?): { Finding }
 		for index = 1, connect - 1 do
 			local name = text(index)
 			local yields = YIELDING_CALLS[name] or (isSymbol(index - 1, ":") and string.sub(name, -5) == "Async")
+			-- `script:WaitForChild("X")`: the script's own children are loaded with it
+			if name == "WaitForChild" and isName(index - 2, "script") and not isSymbol(index - 3, ".") then
+				yields = false
+			end
 			if isName(index) and yields and isSymbol(index + 1, "(") and runsAtStart(index) then
 				return `after code that can pause the script ({name} on line {tokens[index].line})`
 			end

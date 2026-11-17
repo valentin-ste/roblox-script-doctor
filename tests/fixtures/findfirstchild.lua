@@ -31,3 +31,9 @@ end
 -- Fine: WaitForChild does not return nil without a timeout.
 tool:WaitForChild("Handle").Anchored = false
 print(Players)
+
+-- Fine: the script's own children come with it; inside pcall a missing object stops nothing.
+script:FindFirstChild("Config"):Destroy()
+pcall(function()
+	workspace:FindFirstChild("ThumbnailCamera"):Destroy()
+end)

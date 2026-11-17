@@ -12,8 +12,11 @@
 	3. Sample sets (research/samples/<set>): findings are compared with a reviewed
 	   snapshot in tests/snapshots/<set>.txt, so any change in behaviour is visible.
 	4. Hand labels (research/labels.csv): for the AI sample sets, how many labelled problems
-	   are caught, missed, and how many findings have no label. Printed, not enforced: the
-	   snapshots already fail on any change, this tells whether the change is for the better.
+	   are caught and missed, and how many findings have no label. A miss or a finding without
+	   a label fails: label it (or fix the rule) before updating the snapshots.
+	5. Verdicts on free models (research/labels-free-models.csv): every security and bug
+	   finding there was read by a person and marked real / unsure / false. Prints precision
+	   per rule; a security or bug finding without a verdict fails.
 ]]
 local fs = require("@lune/fs")
 local process = require("@lune/process")
@@ -188,7 +191,7 @@ do
 end
 
 -- 3: sample sets ---------------------------------------------------------------
-type Labelled = { file: string, line: number, rule: string }
+type Labelled = { file: string, line: number, rule: string, severity: string? }
 
 local function runSet(set: string, mustMatch: boolean): { Labelled }
 	local folder = "research/samples/" .. set
@@ -216,7 +219,10 @@ local function runSet(set: string, mustMatch: boolean): { Labelled }
 				lines,
 				string.format("%s:%d:%d %s %s", name, finding.line, finding.col, finding.severity, finding.rule)
 			)
-			table.insert(found, { file = set .. "/" .. name, line = finding.line, rule = finding.rule })
+			table.insert(
+				found,
+				{ file = set .. "/" .. name, line = finding.line, rule = finding.rule, severity = finding.severity }
+			)
 		end
 	end
 	local text = table.concat(lines, "\n") .. "\n"
@@ -357,6 +363,84 @@ local function compareWithLabels(sets: { string }, foundBySet: { [string]: { Lab
 		for _, item in unlabelled do
 			print("    no label   " .. item)
 		end
+		checks += 1
+		if #missed > 0 or #unlabelled > 0 then
+			fail(`{set}: {#missed} labelled problems missed, {#unlabelled} findings without a label`)
+		end
+	end
+end
+
+-- 5: verdicts on free models ---------------------------------------------------------
+local function compareWithVerdicts(found: { Labelled })
+	local path = "research/labels-free-models.csv"
+	if not fs.isFile(path) then
+		print("verdicts: " .. path .. " not found, skipped")
+		return
+	end
+	-- "file:line:rule" -> verdicts (one per finding; a line can have two findings)
+	local verdicts: { [string]: { string } } = {}
+	for index, line in splitLines(fs.readFile(path)) do
+		if index == 1 or line == "" then
+			continue
+		end
+		local fields = csvFields(line)
+		local key = `free-models/{fields[1]}:{fields[2]}:{fields[3]}`
+		verdicts[key] = verdicts[key] or {}
+		table.insert(verdicts[key], fields[4])
+	end
+	local perRule: { [string]: { [string]: number } } = {}
+	local missing = {}
+	for _, finding in found do
+		if finding.severity ~= "security" and finding.severity ~= "bug" then
+			continue
+		end
+		local key = `{finding.file}:{finding.line}:{finding.rule}`
+		local list = verdicts[key]
+		local verdict = if list and #list > 0 then table.remove(list, 1) else nil
+		if not verdict then
+			table.insert(missing, key)
+			continue
+		end
+		perRule[finding.rule] = perRule[finding.rule] or { real = 0, unsure = 0, wrong = 0 }
+		-- "false" is a keyword in Luau, so the count is kept as "wrong"
+		local bucket = if verdict == "false" then "wrong" else verdict
+		perRule[finding.rule][bucket] = (perRule[finding.rule][bucket] or 0) + 1
+	end
+	print("verdicts (research/labels-free-models.csv, security and bug findings on free models)")
+	local rules = {}
+	for rule in perRule do
+		table.insert(rules, rule)
+	end
+	table.sort(rules)
+	local real, unsure, wrong = 0, 0, 0
+	for _, rule in rules do
+		local counts = perRule[rule]
+		real += counts.real
+		unsure += counts.unsure
+		wrong += counts.wrong
+		print(string.format("  %-34s real %2d, unsure %2d, false %2d", rule, counts.real, counts.unsure, counts.wrong))
+	end
+	print(
+		string.format(
+			"  total: real %d, unsure %d, false %d; precision %.0f%% of the decided ones",
+			real,
+			unsure,
+			wrong,
+			100 * real / math.max(1, real + wrong)
+		)
+	)
+	-- verdicts left over belong to findings that are gone (fixed rule or lost finding)
+	for key, list in verdicts do
+		for _, verdict in list do
+			print(`    gone ({verdict}) {key}`)
+		end
+	end
+	checks += 1
+	for _, key in missing do
+		print("    no verdict " .. key)
+	end
+	if #missing > 0 then
+		fail(`free-models: {#missing} security/bug findings without a verdict in {path}`)
 	end
 end
 
@@ -365,8 +449,9 @@ local foundBySet = {
 	haiku = runSet("haiku", true),
 	codex = runSet("codex", true),
 }
-runSet("free-models", true)
+local freeModels = runSet("free-models", true)
 compareWithLabels({ "sonnet", "haiku", "codex" }, foundBySet)
+compareWithVerdicts(freeModels)
 
 print(string.format("\n%d checks, %d failures", checks, failures))
 process.exit(if failures > 0 then 1 else 0)
