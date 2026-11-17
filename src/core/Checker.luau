@@ -1299,6 +1299,20 @@ function Checker.check(source: string, options: Options?): { Finding }
 		-- `if <condition> then return end` / `if <condition> then amount = 100 end`: when the
 		-- condition holds, the value does not go on as it was, so the code below has the
 		-- opposite of the condition
+		-- `amount = amount * 2`: the new value is made from the old one, so it limits nothing
+		-- (`amount = math.min(amount, MAX)` counts through the math.min call instead)
+		local function usesItself(start: number, param: string): boolean
+			local line = tokens[start] and tokens[start].line
+			local cursor = start
+			while tokens[cursor] and tokens[cursor].line == line and not isKeyword(cursor, "end") do
+				if isName(cursor, param) and not isSymbol(cursor - 1, ".") then
+					return true
+				end
+				cursor += 1
+			end
+			return false
+		end
+
 		local function branchOverrides(thenIndex: number, param: string): boolean
 			local block = blockAt[thenIndex]
 			if not block or block.kind ~= "if" or not block.finish then
@@ -1317,6 +1331,7 @@ function Checker.check(source: string, options: Options?): { Finding }
 							and isSymbol(cursor + 1, "=")
 							and not isKeyword(cursor - 1, "local")
 							and not isSymbol(cursor - 1, ".")
+							and not usesItself(cursor + 2, param)
 						)
 					then
 						return true
@@ -1324,6 +1339,20 @@ function Checker.check(source: string, options: Options?): { Finding }
 				end
 			end
 			return false
+		end
+
+		-- Does a check at `inner` hold where the code goes on? "holds" (`assert(x)`, or the
+		-- branch the write sits in), "negated" (`if x then return end` / `then amount = MAX`) or
+		-- nil when it can be skipped (`... and not isVip then return`, `... or isVip then`).
+		local function conditionSense(inner: number, param: string): string?
+			local thenIndex = conditionThen[inner]
+			if not thenIndex then
+				return "holds"
+			end
+			if branchOverrides(thenIndex, param) then
+				return if joinedByAnd[thenIndex] then nil else "negated"
+			end
+			return if joinedByOr[thenIndex] then nil else "holds"
 		end
 
 		-- Which limit a comparison puts on the value where the code goes on: "upper"
@@ -1342,23 +1371,19 @@ function Checker.check(source: string, options: Options?): { Finding }
 			if isKeyword(other, "nil") or isKeyword(other, "true") or isKeyword(other, "false") then
 				return nil
 			end
+			local sense = conditionSense(inner, param)
+			if not sense then
+				return nil
+			end
 			if operator == "==" then
-				return "both"
+				-- `if amount == 5 then return end` leaves any other number
+				return if sense == "holds" then "both" else nil
 			end
 			local less = operator == "<" or operator == "<="
 			-- "the value is at most X": amount < X, amount <= X, X > amount, X >= amount
 			local statesUpper = if paramLeft then less else not less
-			local thenIndex = conditionThen[inner]
-			if thenIndex and branchOverrides(thenIndex, param) then
-				-- `if a > MAX or b then return end` limits a; with `and` (`a > MAX and not isVip`)
-				-- the check can be skipped
-				if joinedByAnd[thenIndex] then
-					return nil
-				end
+			if sense == "negated" then
 				statesUpper = not statesUpper
-			elseif thenIndex and joinedByOr[thenIndex] then
-				-- `if a <= MAX or isVip then <write> end`: the write can run without the limit
-				return nil
 			end
 			if statesUpper then
 				return "upper"
@@ -1392,6 +1417,8 @@ function Checker.check(source: string, options: Options?): { Finding }
 				if inCondition[inner] or isCompared or isTableKey then
 					checked = true
 				end
+				-- `typeof(c) == "Color3"` where it holds, or `typeof(c) ~= "Color3" then return`:
+				-- the code goes on only with something other than a number
 				if
 					(isName(inner - 2, "typeof") or isName(inner - 2, "type"))
 					and isSymbol(inner - 1, "(")
@@ -1400,7 +1427,11 @@ function Checker.check(source: string, options: Options?): { Finding }
 					and kind(inner + 3) == "string"
 					and text(inner + 3) ~= "number"
 				then
-					notNumber = true
+					local sense = conditionSense(inner, param)
+					local isEqual = isSymbol(inner + 2, "==")
+					if (isEqual and sense == "holds") or (not isEqual and sense == "negated") then
+						notNumber = true
+					end
 				end
 				local bound = if isTableKey then "both" else comparisonBound(inner, param)
 				upper = upper or bound == "upper" or bound == "both"

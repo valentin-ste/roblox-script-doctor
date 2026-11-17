@@ -122,3 +122,40 @@ ReplicatedStorage.Paint.OnServerEvent:Connect(function(player, color)
 		player.Settings.Color.Value = color
 	end
 end)
+
+-- Fine: only a colour gets past the check.
+ReplicatedStorage.Paint2.OnServerEvent:Connect(function(player, color)
+	if typeof(color) ~= "Color3" then
+		return
+	end
+	player.Settings.Color.Value = color
+end)
+
+-- A type check that lets numbers through: no limit.
+ReplicatedStorage.Give12.OnServerEvent:Connect(function(player, amount)
+	if typeof(amount) == "string" then
+		return
+	end
+	player.leaderstats.Coins.Value += amount --! remote-client-value
+end)
+ReplicatedStorage.Give13.OnServerEvent:Connect(function(player, amount)
+	if type(amount) ~= "table" then
+		player.leaderstats.Coins.Value += amount --! remote-client-value
+	end
+end)
+
+-- An assignment made from the old value limits nothing.
+ReplicatedStorage.Give14.OnServerEvent:Connect(function(player, amount)
+	if amount > MAX_GIFT then
+		amount = amount * 2
+	end
+	player.leaderstats.Coins.Value += amount --! remote-client-value
+end)
+
+-- `== 5 then return` leaves every other number.
+ReplicatedStorage.Give15.OnServerEvent:Connect(function(player, amount)
+	if amount == 5 then
+		return
+	end
+	player.leaderstats.Coins.Value += amount --! remote-client-value
+end)
