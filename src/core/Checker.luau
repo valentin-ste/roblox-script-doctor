@@ -324,7 +324,7 @@ local LOOP_HEADER_LOOKBACK = 12
 local VALIDATOR_LOOKBACK = 16
 -- `leaderstats.Coins.Value += amount * 2` on one line: the "=" is this close before the value.
 local VALUE_WRITE_LOOKBACK = 10
--- A string literal this long with this many numeric escapes ("\104\116...") is hidden text.
+-- A string literal this long, written mostly as backslash-number character codes, is hidden text.
 local ENCODED_STRING_MIN_LENGTH = 36
 local ENCODED_STRING_MIN_ESCAPES = 12
 
@@ -1511,7 +1511,8 @@ function Checker.check(source: string, options: Options?): { Finding }
 		end
 	end
 
-	-- "\104\116\116\112..." : a long run of numeric escapes; ("eriuqer"):reverse()
+	-- a string written as a long run of backslash-number character codes, or a string literal
+	-- that is reversed in place with :reverse()
 	local function checkEncodedString(index: number)
 		local value = text(index)
 		if
