@@ -75,7 +75,10 @@ way, and a finding is a reason to look, not proof.
 
 ## Install
 
-Not on the Creator Store yet. From the source (needs [Rojo](https://rojo.space)):
+From the Creator Store: https://create.roblox.com/store/asset/139789357468949 (free). In Studio
+the plugin appears in the Plugins tab as **Script Doctor**.
+
+From the source (needs [Rojo](https://rojo.space)):
 
 ```sh
 rojo build default.project.json -o ScriptDoctor.rbxm
